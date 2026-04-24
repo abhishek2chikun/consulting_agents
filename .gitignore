@@ -4,6 +4,9 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Local tooling configs (user-specific)
+opencode.json
+
 # Ignore stray docs/notes by default, but keep the spec tree
 docs/*
 !docs/superpowers/
