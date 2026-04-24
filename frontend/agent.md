@@ -27,14 +27,19 @@ Single-page-ish web app where a consultant picks a task, fills a brief / answers
 ```text
 frontend/
   app/
-    layout.tsx           # Root layout (Geist fonts, globals.css)
+    layout.tsx           # Root layout (Geist fonts, globals.css, <Toaster/>)
     page.tsx             # Landing page (placeholder this milestone)
     globals.css          # Tailwind v4 + shadcn theme tokens
     favicon.ico
+    settings/
+      page.tsx           # Settings UI (M2.7) — providers, overrides, search, retries
   components/
-    ui/                  # shadcn primitives (button, card, input, textarea, sonner)
+    ui/                  # shadcn primitives (button, card, input, textarea, sonner,
+                         #   label, select, radio-group, separator, badge)
   lib/
     utils.ts             # cn() helper from shadcn
+    api.ts               # Typed REST client for the FastAPI backend (M2.7)
+    types.ts             # DTO mirrors of backend Pydantic schemas (M2.7)
   public/                # Static assets
   components.json        # shadcn config
   eslint.config.mjs
@@ -52,35 +57,47 @@ frontend/
 
 | Path                          | Status              | Purpose                                               |
 | ----------------------------- | ------------------- | ----------------------------------------------------- |
-| `app/layout.tsx`              | Boilerplate         | Root HTML + font + globals                            |
+| `app/layout.tsx`              | Boilerplate + Toaster | Root HTML + font + globals + sonner mount           |
 | `app/page.tsx`                | Placeholder (M1.2)  | Will become task-picker landing                       |
-| `app/settings/page.tsx`       | Planned (M2.7)      | Provider/key/retry settings                           |
+| `app/settings/page.tsx`       | Active (M2.7)       | Provider keys, model overrides, search, retry config  |
 | `app/runs/[id]/page.tsx`      | Planned (M5.7)      | Run view (live trace + report)                        |
 | `components/ui/button.tsx`    | Boilerplate         | shadcn Button                                         |
 | `components/ui/card.tsx`      | Boilerplate         | shadcn Card                                           |
 | `components/ui/input.tsx`     | Boilerplate         | shadcn Input                                          |
 | `components/ui/textarea.tsx`  | Boilerplate         | shadcn Textarea                                       |
 | `components/ui/sonner.tsx`    | Boilerplate         | Toast container (sonner)                              |
+| `components/ui/label.tsx`     | Added (M2.7)        | shadcn Label                                          |
+| `components/ui/select.tsx`    | Added (M2.7)        | shadcn Select (base-ui)                               |
+| `components/ui/radio-group.tsx` | Added (M2.7)      | shadcn RadioGroup (base-ui)                           |
+| `components/ui/separator.tsx` | Added (M2.7)        | shadcn Separator                                      |
+| `components/ui/badge.tsx`     | Added (M2.7)        | shadcn Badge                                          |
 | `components/AgentTrace.tsx`   | Planned (M7.2)      | Live agent step stream                                |
 | `components/ReportView.tsx`   | Planned (M7.3)      | Final markdown report renderer                        |
 | `components/SourcesSidebar.tsx` | Planned (M7.4)    | Cited sources panel                                   |
 | `components/UsagePanel.tsx`   | Planned (M7.5)      | Token / cost usage display                            |
 | `components/QuestionnaireForm.tsx` | Planned (M6.3) | Clarifying-questions form                            |
 | `lib/utils.ts`                | Boilerplate         | shadcn `cn()` helper                                  |
-| `lib/api.ts`                  | Planned (M2.7)      | Typed REST client for FastAPI backend                 |
+| `lib/api.ts`                  | Active (M2.7)       | Typed REST client for FastAPI backend                 |
+| `lib/types.ts`                | Active (M2.7)       | DTO mirrors of backend Pydantic schemas               |
 | `lib/sse.ts`                  | Planned (M5.7)      | SSE consumption helper                                |
 
 ## Conventions
 
 - TypeScript strict (per `tsconfig.json`)
 - TailwindCSS v4 (PostCSS-based, no `tailwind.config.*`); theme tokens live in `app/globals.css`
-- shadcn/ui for UI primitives (New York style, neutral base, CSS variables)
+- shadcn/ui for UI primitives (style `base-nova`, neutral base, CSS variables, base-ui under the hood)
 - pnpm for package management
 - Server components by default; add `"use client"` only when needed (state, effects, browser APIs)
-- API access goes through `lib/api.ts` (planned M2.7), never inline `fetch` in components
+- API access goes through `lib/api.ts`, never inline `fetch` in components
 - SSE consumption goes through `lib/sse.ts` (planned M5.7)
 - Path alias: `@/*` → repo `frontend/` root
 - No per-component `agent.md` files — this single file is the registry
+
+## Environment
+
+| Var                          | Default                  | Used by             |
+| ---------------------------- | ------------------------ | ------------------- |
+| `NEXT_PUBLIC_API_BASE_URL`   | `http://localhost:8000`  | `lib/api.ts`        |
 
 ## Verification commands
 
@@ -95,12 +112,11 @@ curl -s http://localhost:3000 | grep "Consulting Research Agent"
 ## Progress
 
 - **M1.2 ✅** — Next.js 16 + Tailwind v4 + shadcn scaffold, placeholder landing page with build-info card. Lint/typecheck/build all clean. Heading verified in rendered HTML.
+- **M2.7 ✅** — Settings UI at `/settings` (4 sections: LLM provider keys with `has_key` badges, per-role model overrides with Test-connection ping, search-provider radio + per-key inputs, max stage retries 1..5). New `lib/api.ts` (typed fetch wrapper + `ApiRequestError`) and `lib/types.ts` (DTO mirrors of `backend/app/schemas/{settings,ping}.py`). Backend: CORS middleware allowing `http://localhost:3000` (V1 single-user local dev). shadcn additions: label, select, radio-group, separator, badge. Sonner `<Toaster />` mounted in `app/layout.tsx`. Smoke-verified: `PUT /settings/providers/anthropic` flips `has_key` to true, `PUT /settings/max_stage_retries` with `99` returns 422, full settings snapshot persists.
 
 ## Deferred work
 
-- Settings page (M2.7)
-- Typed API client `lib/api.ts` (M2.7)
-- Search-provider selector UI (M4.7)
+- Search-provider selector UI refinement (M4.7 — currently has a stub)
 - Run view + SSE consumer + `lib/sse.ts` (M5.7)
 - Clarifying-questions form (M6.3)
 - AgentTrace, ReportView, SourcesSidebar, UsagePanel components (M7.2–M7.5)
