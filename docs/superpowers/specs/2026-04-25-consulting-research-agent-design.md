@@ -12,7 +12,7 @@ Build an open-source, agentic consulting research system that compresses consult
 
 The product feels like a chatbot: the user picks a consulting task type, optionally uploads documents, states a goal, answers an upfront questionnaire, and receives a structured, citation-backed Markdown report.
 
-V1 ships a **single end-to-end vertical slice**: the **Market Entry** consulting task. M&A and other task types are scaffolded (registered in the catalog, supervisor stubbed) but not implemented.
+V1 ships a **single end-to-end vertical slice**: the **Market Entry** consulting task. M&A and other task types are scaffolded (registered in the catalog, graph stubbed) but not implemented.
 
 ---
 
@@ -21,10 +21,10 @@ V1 ships a **single end-to-end vertical slice**: the **Market Entry** consulting
 ### In scope (V1)
 
 - Web chat UI to start, monitor, and review one Market Entry run.
-- FastAPI backend with deepagents-based orchestration.
+- FastAPI backend with **LangGraph** orchestration as the deterministic outer state machine, and **DeepAgents** wrapped as autonomous research nodes inside specific stages.
 - Single local user. Encrypted server-side storage of LLM and search-provider API keys.
 - Pluggable web search across **Tavily, Exa, Perplexity** behind one tool interface.
-- Pluggable LLM access via **LiteLLM** router (provider/model configurable per agent role).
+- Pluggable LLM access via **LangChain provider integrations** (`langchain-anthropic`, `langchain-openai`, `langchain-google-genai`, etc.); provider/model configurable per agent role. No LiteLLM.
 - Document ingestion via **Docling** → chunk → embed → **Postgres + pgvector**.
 - Staged Market Entry pipeline with **Reviewer quality gates** between stages and bounded re-iteration.
 - Mandatory inline citations with an auto-tracked per-run evidence table.
@@ -52,7 +52,8 @@ V1 ships a **single end-to-end vertical slice**: the **Market Entry** consulting
 | V1 scope | Thin vertical slice — Market Entry only |
 | Knowledge layer | Docling + Postgres + pgvector. No Neo4j, no LightRAG in V1 |
 | Web search | Provider-agnostic interface; Tavily, Exa, Perplexity adapters; user picks in Settings |
-| LLM | LiteLLM router; provider/model configurable per agent role |
+| LLM | LangChain provider integrations (Anthropic, OpenAI, Gemini, Bedrock, etc.); per-role model overrides. **No LiteLLM.** |
+| Orchestration | **Hybrid: LangGraph (deterministic outer state machine) + DeepAgents (autonomous research nodes within stages).** |
 | Repo | Monorepo: `/backend` (FastAPI), `/frontend` (Next.js + TS), `/infra` |
 | Streaming | SSE; runs persisted in Postgres; reconnect via `Last-Event-ID` |
 | Users | Single local user, no login |
@@ -76,29 +77,34 @@ V1 ships a **single end-to-end vertical slice**: the **Market Entry** consulting
 └──────────────────────────┘                                         │
                                                                      ▼
                                                 ┌──────────────────────────────────────┐
-                                                │ Orchestrator (deepagents)            │
-                                                │  Market Entry Supervisor             │
-                                                │   ├ Stage 0  Framing (questionnaire) │
+                                                │ Orchestrator                         │
+                                                │  LangGraph StateGraph (outer)        │
+                                                │   ├ Stage 0  Framing  (LLM node)     │
                                                 │   ├ Stage 1  Foundation              │
+                                                │   │   DeepAgent node                 │
                                                 │   │   (sizing | customer | reg)      │
-                                                │   ├ Gate 1   Reviewer                │
+                                                │   ├ Gate 1   Reviewer (LLM node)     │
                                                 │   ├ Stage 2  Competitive             │
+                                                │   │   DeepAgent node                 │
                                                 │   │   (competitor | channel | price) │
-                                                │   ├ Gate 2   Reviewer                │
-                                                │   ├ Stage 3  Risk                    │
-                                                │   ├ Gate 3   Reviewer                │
-                                                │   ├ Stage 4  Synthesis               │
-                                                │   └ Final    Audit                   │
+                                                │   ├ Gate 2   Reviewer (LLM node)     │
+                                                │   ├ Stage 3  Risk (DeepAgent node)   │
+                                                │   ├ Gate 3   Reviewer (LLM node)     │
+                                                │   ├ Stage 4  Synthesis (LLM node)    │
+                                                │   └ Final    Audit (LLM node)        │
+                                                │  Conditional edges enforce gates,    │
+                                                │  retry caps, and forced-advance.     │
                                                 └──────────┬───────────────────────────┘
                                                            │
                             ┌──────────────────────────────┼─────────────────────────────┐
                             ▼                              ▼                             ▼
                    ┌────────────────────┐       ┌─────────────────────┐       ┌──────────────────────┐
-                   │ Tools layer        │       │ LiteLLM router      │       │ Postgres + pgvector  │
-                   │ • web_search       │       │ Anthropic / OpenAI  │       │ runs, events,        │
-                   │   ├ tavily         │       │ Gemini / Bedrock /  │       │ messages, artifacts, │
-                   │   ├ exa            │       │ local               │       │ documents, chunks,   │
-                   │   └ perplexity     │       └─────────────────────┘       │ evidence, settings   │
+                   │ Tools layer        │       │ LangChain chat      │       │ Postgres + pgvector  │
+                   │ (LangChain Tools)  │       │ models (per role)   │       │ runs, events,        │
+                   │ • web_search       │       │ Anthropic / OpenAI  │       │ messages, artifacts, │
+                   │   ├ tavily         │       │ Gemini / Bedrock /  │       │ documents, chunks,   │
+                   │   ├ exa            │       │ Ollama              │       │ evidence, settings,  │
+                   │   └ perplexity     │       └─────────────────────┘       │ gates, checkpoints   │
                    │ • fetch_url        │                                     └──────────────────────┘
                    │ • rag_search       │                ▲
                    │ • read_doc         │                │
@@ -133,7 +139,7 @@ consulting_agents/
 │   │   ├── schemas/                      # Pydantic DTOs
 │   │   ├── agents/
 │   │   │   ├── base.py
-│   │   │   ├── llm.py                    # LiteLLM model factory (per-role)
+│   │   │   ├── llm.py                    # LangChain chat model factory (per-role)
 │   │   │   ├── tools/
 │   │   │   │   ├── web_search.py
 │   │   │   │   ├── providers/{tavily,exa,perplexity}.py
@@ -143,22 +149,26 @@ consulting_agents/
 │   │   │   │   ├── artifacts.py
 │   │   │   │   └── cite.py               # records evidence, returns src_id
 │   │   │   ├── market_entry/
-│   │   │   │   ├── supervisor.py         # deepagents top-level
-│   │   │   │   ├── framing.py
-│   │   │   │   ├── stage1_foundation/{market_sizing,customer,regulatory}.py
-│   │   │   │   ├── stage2_competitive/{competitor,channel,pricing}.py
-│   │   │   │   ├── stage3_risk/risk.py
-│   │   │   │   ├── reviewer.py           # gate; emits JSON verdict
-│   │   │   │   ├── synthesis.py
-│   │   │   │   └── audit.py
+│   │   │   │   ├── graph.py              # LangGraph StateGraph (outer pipeline)
+│   │   │   │   ├── state.py              # TypedDict run state shared across nodes
+│   │   │   │   ├── nodes/
+│   │   │   │   │   ├── framing.py        # LangGraph node (LLM)
+│   │   │   │   │   ├── reviewer.py       # LangGraph node (LLM, JSON verdict)
+│   │   │   │   │   ├── synthesis.py      # LangGraph node (LLM)
+│   │   │   │   │   └── audit.py          # LangGraph node (LLM)
+│   │   │   │   ├── deepagents/           # autonomous research nodes
+│   │   │   │   │   ├── stage1_foundation.py   # one DeepAgent w/ 3 sub-agents
+│   │   │   │   │   ├── stage2_competitive.py  # one DeepAgent w/ 3 sub-agents
+│   │   │   │   │   └── stage3_risk.py         # one DeepAgent (risk only)
+│   │   │   │   └── prompts/              # all system prompts as files
 │   │   │   └── ma/                       # stub for V2
 │   │   ├── ingestion/
 │   │   │   ├── docling_parser.py
 │   │   │   ├── chunker.py
-│   │   │   └── embedder.py               # via LiteLLM embeddings
+│   │   │   └── embedder.py               # via LangChain Embeddings
 │   │   └── workers/
 │   │       ├── ingest_worker.py          # arq job: parse+chunk+embed
-│   │       └── run_worker.py             # arq job: executes a run
+│   │       └── run_worker.py             # arq job: invokes the LangGraph
 │   ├── alembic/
 │   ├── tests/
 │   └── pyproject.toml
@@ -190,16 +200,20 @@ consulting_agents/
 
 ## 6. Backend Components
 
-### 6.1 LLM router (LiteLLM)
+### 6.1 LLM provider layer (LangChain)
 
-`agents/llm.py` exposes `get_chat_model(role: str)` returning a LangChain-compatible chat model via LiteLLM. Mapping of `role → provider/model` lives in `settings.model_overrides` (DB) with an env-level default. Suggested defaults:
+`agents/llm.py` exposes `get_chat_model(role: str) -> BaseChatModel` returning a LangChain chat model directly from the provider's official integration package (`langchain-anthropic`, `langchain-openai`, `langchain-google-genai`, `langchain-aws`, `langchain-ollama`). A small `PROVIDER_REGISTRY` dict maps a provider slug to a constructor. No LiteLLM, no extra abstraction layer — LangChain's `BaseChatModel` interface is already the abstraction.
 
-| Role | Default model |
+Mapping of `role → {provider, model, params}` lives in `settings.model_overrides` (DB) with env-level defaults. API keys are pulled from the encrypted `provider_keys` table at model construction time and passed explicitly (never via process env, so per-run overrides are safe).
+
+Suggested defaults:
+
+| Role | Default model class |
 |---|---|
-| framing, reviewer, audit | mid-tier reasoning model |
-| sub-agents (research) | mid-tier with tool use |
-| synthesis | top-tier reasoning model |
-| embeddings | `text-embedding-3-small` (or provider equivalent) |
+| framing, reviewer, audit | mid-tier reasoning model (e.g., Claude Sonnet, GPT-4.1-mini) |
+| sub-agents (research, inside DeepAgents) | mid-tier with strong tool use |
+| synthesis | top-tier reasoning model (e.g., Claude Opus, GPT-4.1) |
+| embeddings | provider-native (`text-embedding-3-small` or `voyage-3-lite`) via `langchain-*` Embeddings classes |
 
 ### 6.2 Web search abstraction
 
@@ -229,22 +243,59 @@ All tools share two responsibilities: do the work, and emit structured events.
 | `read_doc(doc_id)` | Returns full Docling-parsed Markdown for a document |
 | `cite_source(src_id, claim)` | Optional explicit citation registration (used by sub-agents that synthesize across sources) |
 | `write_artifact(path, content)` | Writes/updates a Markdown artifact for the run (e.g., `stage1/market_sizing.md`, `final_report.md`) |
-| `write_todos(...)` | deepagents built-in; supervisor uses for staged plan |
+| `write_todos(...)` | DeepAgents built-in; used by stage DeepAgent nodes for sub-agent planning |
 
 Every tool emits a `tool_call` and `tool_result` event into the run event stream.
 
-### 6.4 Deepagents orchestration
+### 6.4 Hybrid orchestration (LangGraph + DeepAgents)
 
-The Market Entry **Supervisor** is a deepagents `create_deep_agent(...)` configured with:
+The Market Entry pipeline is a **LangGraph `StateGraph`** that owns deterministic control flow. DeepAgents is used **only inside specific stage nodes** that benefit from autonomous tool use across multiple sub-topics. This split keeps gating, retries, persistence, and resumability under LangGraph's deterministic control while letting research stages explore freely.
 
-- **Subagents:** framing, reviewer, market_sizing, customer, regulatory, competitor, channel, pricing, risk, synthesis, audit.
-- **Tools:** the layer above plus deepagents built-ins (`write_todos`, virtual filesystem).
-- **System prompt:** encodes the staged pipeline (see §7), forbids advancing past a gate without a Reviewer `advance` verdict, requires inline citations.
+**Where each framework is used:**
+
+| Concern | Framework | Why |
+|---|---|---|
+| Outer pipeline (stages, gates, retries, conditional advance, cancel) | **LangGraph** | First-class state machine, conditional edges, checkpointing, replay |
+| Framing, Reviewer (gate), Synthesis, Audit | **LangGraph nodes** (single LLM call with structured output) | Need predictable schemas, no autonomous tool loops |
+| Stage 1 Foundation, Stage 2 Competitive, Stage 3 Risk research | **DeepAgents wrapped as a LangGraph node** | Each stage has 1–3 sub-topics that benefit from a planner + virtual filesystem + autonomous tool use; DeepAgents handles the inner research loop |
+| Tool definitions (web_search, rag_search, fetch_url, etc.) | **LangChain `@tool`** | Both LangGraph nodes and DeepAgents consume LangChain tools natively |
+
+**Shared run state (LangGraph `StateGraph` channels):**
+
+```python
+class RunState(TypedDict, total=False):
+    run_id: str
+    goal: str
+    document_ids: list[str]
+    framing: FramingBrief                  # populated after Stage 0
+    answers: dict                          # questionnaire answers
+    artifacts: dict[str, str]              # path -> markdown content (mirrored to DB)
+    evidence: list[EvidenceRef]            # accumulating
+    stage_attempts: dict[str, int]         # stage_slug -> attempt count
+    gate_verdicts: dict[str, GateVerdict]  # stage_slug -> last verdict
+    target_agents: list[str] | None        # set by reviewer for retries
+    cancelled: bool
+```
+
+**Gate logic (conditional edges):** after each research stage node, the graph routes to a Reviewer node. The Reviewer's structured-output verdict drives a conditional edge:
+
+- `verdict.advance` → next stage
+- `verdict.reiterate` AND `attempts < 2` → back to the same stage node, with `target_agents` set so the DeepAgent reruns only those sub-topics
+- `verdict.reiterate` AND `attempts >= 2` → forced advance, gaps logged into `audit.md`
+
+**Checkpointing:** LangGraph's Postgres checkpointer (`langgraph-checkpoint-postgres`) persists graph state to the same DB. This gives us free crash-resume *between nodes* (we still don't auto-resume mid-tool-call in V1).
+
+**DeepAgent stage nodes:** each stage (Foundation, Competitive, Risk) is a `create_deep_agent(...)` instance whose:
+
+- **Sub-agents** are the per-topic researchers (e.g., Foundation has `market_sizing`, `customer`, `regulatory`).
+- **Tools** are the LangChain tools from §6.3.
+- **Instructions** include the framing brief, prior-stage artifacts, and (on retry) the reviewer gaps + `target_agents`.
+- **Output contract**: writes Markdown sections via `write_artifact` and returns a summary dict the LangGraph node merges into `RunState`.
 
 ### 6.5 RAG ingestion pipeline
 
 1. `POST /documents` accepts file upload, stores binary under `/data/uploads/{doc_id}`, inserts a `documents` row with `status='pending'`.
-2. arq job picks it up: Docling → structured Markdown → token-aware chunker (target ~800 tokens, 100 overlap) → LiteLLM embedding → `chunks(embedding vector(1536))`.
+2. arq job picks it up: Docling → structured Markdown → token-aware chunker (target ~800 tokens, 100 overlap) → LangChain Embeddings (per active provider) → `chunks(embedding vector(N))`.
 3. `documents.status` transitions `pending → parsing → embedding → ready` (or `failed` with error).
 4. `rag_search(query, doc_ids?)` performs cosine similarity (`<=>`) with optional filter by document scope.
 
@@ -265,7 +316,7 @@ Core tables (Alembic-managed):
 
 - `users` (single row in V1; column reserved for future multi-user)
 - `provider_keys (id, user_id, provider, encrypted_key, created_at)` — Fernet-encrypted
-- `settings (user_id, key, value_json)` — active LLM router config, active search provider, model overrides
+- `settings (user_id, key, value_json)` — active LLM provider/model per role, active search provider, embedding model + dim, etc.
 - `tasks (id, slug, name, description, enabled)` — catalog
 - `documents (id, user_id, filename, mime, size, status, error, created_at)`
 - `chunks (id, document_id, ord, text, embedding vector(N), embedding_model text, metadata jsonb)` — `N` is set at first ingest from the active embedding model's dimension and recorded in `settings.embedding_dim`. Switching embedding model requires a re-ingest migration; this is documented in the Settings UI and not handled automatically in V1.
@@ -275,6 +326,7 @@ Core tables (Alembic-managed):
 - `artifacts (id, run_id, path, kind, content, updated_at)` — versionless overwrite-on-write Markdown
 - `evidence (id, run_id, src_id, kind, url|chunk_id, title, snippet, accessed_at)` — citation registry
 - `gates (id, run_id, stage, attempt, verdict, gaps jsonb, target_agents jsonb, created_at)`
+- `langgraph_checkpoints` — managed by `langgraph-checkpoint-postgres`; stores serialized `RunState` per node transition for crash-resume and replay.
 
 Indexes: `chunks` HNSW on `embedding`; `events(run_id, id)` for SSE replay.
 
@@ -288,7 +340,7 @@ Reconnects resume from `Last-Event-ID`. The events table is the durable log; the
 
 ### 6.9 Soft guardrails
 
-`core/budget.py` accumulates token usage and dollar estimates per run (LiteLLM exposes per-call token + cost). Every `tool_call` emits a `usage_update` event. The UI shows running totals and a Cancel button. No tool ever blocks on budget in V1.
+`core/budget.py` accumulates token usage and dollar estimates per run. Token counts come from LangChain's `UsageMetadataCallbackHandler` (attached to every chat-model call); dollar estimates are computed from a small static price table per `(provider, model)` kept in `core/pricing.py`. Every `tool_call` and LLM call emits a `usage_update` event. The UI shows running totals and a Cancel button. No tool ever blocks on budget in V1.
 
 ---
 
@@ -342,7 +394,7 @@ Every research sub-agent must:
 
 ### 7.3 Reviewer (gate) contract
 
-The Reviewer is a deepagents subagent invoked after each stage. It reads all artifacts from the just-completed stage and emits a strict JSON verdict (no prose):
+The Reviewer is a LangGraph node (single LLM call with structured output via `with_structured_output(GateVerdict)`) invoked after each stage. It reads all artifacts from the just-completed stage and emits a strict JSON verdict (no prose):
 
 ```json
 {
@@ -358,7 +410,7 @@ The Reviewer is a deepagents subagent invoked after each stage. It reads all art
 Rules:
 
 - `verdict=reiterate` reruns only `target_agents` (not the whole stage).
-- Max 2 reiterations per stage. On the 3rd attempt the supervisor force-advances and logs gaps as residual into `audit`.
+- Max 2 reiterations per stage. On the 3rd attempt the conditional edge force-advances and gaps are merged into `RunState` for `audit` to log.
 - Reviewer cannot ask the user questions; it works only with what is already in the run.
 
 ### 7.4 Synthesis and Audit
@@ -379,7 +431,7 @@ Rules:
 2. **New Run:** task picker (Market Entry enabled, M&A disabled with "Coming soon"), goal text, optional document uploads (multi-file), submit → `POST /runs`.
 3. **Questionnaire:** UI renders the structured questionnaire returned by Framing (fields, types, helper text). Submit → `POST /runs/{id}/answers`, transitions to live view.
 4. **Run view (split layout):**
-   - **Left:** chat-style transcript (user goal, framing answers, supervisor narration).
+   - **Left:** chat-style transcript (user goal, framing answers, stage narration).
    - **Center:** **AgentTrace** — collapsible stage groups, per-agent activity, tool calls with queries and source titles, gate verdicts.
    - **Right:** **ReportView** — live Markdown of `final_report.md` (or the latest stage artifacts before synthesis); citation tokens hover to show source.
    - **Top-right:** **UsagePanel** — running tokens, est. cost, Cancel button.
@@ -408,7 +460,7 @@ Rules:
 ## 10. Error Handling
 
 - **Tool errors** (search 5xx, fetch timeout, RAG empty): tool returns a structured error object; agent retries up to 2x with backoff, then proceeds noting the gap.
-- **LLM errors** (rate limit, provider outage): LiteLLM retry+fallback if a fallback model is configured; otherwise stage attempt fails and the supervisor logs an `error` event and continues to the next stage with a placeholder gap.
+- **LLM errors** (rate limit, provider outage): LangChain chat models are wrapped with `with_retry(stop_after_attempt=3, exponential_jitter=True)`. If a fallback model is configured for the role (`with_fallbacks`), it is tried next. If still failing, the LangGraph node returns a structured error; the conditional edge routes to a `node_failed` handler that logs an `error` event and either advances with a placeholder gap or, for Synthesis/Audit, marks the run `failed`.
 - **Reviewer infinite loops:** prevented by the hard cap of 2 retries per stage.
 - **Ingestion failures:** `documents.status='failed'` with error message; surfaced in UI.
 - **Worker crash mid-run:** on restart, the worker checks for `runs.status='running'` whose last event is older than N minutes and marks them `failed` (no automatic resume in V1).
@@ -419,7 +471,7 @@ Rules:
 
 - **Unit:** chunker, embedder, each search provider adapter (against recorded fixtures), Fernet wrap/unwrap, evidence registration, citation validator.
 - **Integration:** ingestion pipeline end-to-end on a small PDF; SSE replay from `Last-Event-ID`.
-- **Agent smoke test:** a `FakeChatModel` registered with LiteLLM under provider name `fake` returns scripted JSON/Markdown keyed by agent role and stage attempt. The smoke test drives the supervisor end-to-end, asserting: stage order, gate `advance`/`reiterate` decisions, retry caps (force-advance after 2), citation enforcement (uncited claim → reviewer reiterate), and final report shape (required sections + non-empty Sources).
+- **Agent smoke test:** a `FakeChatModel` (LangChain `BaseChatModel` subclass) returns scripted JSON/Markdown keyed by agent role and stage attempt. The `PROVIDER_REGISTRY` exposes provider slug `fake` for tests. The smoke test invokes the LangGraph end-to-end, asserting: stage order, gate `advance`/`reiterate` decisions, retry caps (force-advance after 2), citation enforcement (uncited claim → reviewer reiterate), conditional-edge routing, and final report shape (required sections + non-empty Sources).
 - **Frontend:** component tests for `AgentTrace`, `ReportView` citation hover, `QuestionnaireForm` validation; one Playwright happy-path against the backend smoke run.
 
 ---
@@ -436,13 +488,13 @@ Rules:
 ## 13. Milestones
 
 1. **M1 — Skeleton:** monorepo, docker-compose, FastAPI + Next.js hello, Postgres+pgvector, Alembic baseline.
-2. **M2 — Settings + LiteLLM:** settings UI, encrypted key storage, ping endpoint.
+2. **M2 — Settings + LLM provider layer:** settings UI, encrypted key storage, LangChain provider registry, ping endpoint that calls a chosen model.
 3. **M3 — Ingestion:** Docling worker, chunk+embed, `rag_search` tool tested.
 4. **M4 — Web search:** Tavily/Exa/Perplexity adapters, provider switch in UI.
-5. **M5 — Deepagents harness + SSE:** minimal supervisor, run lifecycle persisted, SSE end-to-end in chat UI.
-6. **M6 — Market Entry pipeline:** Framing questionnaire, all sub-agents, Reviewer gates, Synthesis, Audit, citation enforcement, final report.
+5. **M5 — LangGraph harness + SSE:** minimal 2-node `StateGraph` with Postgres checkpointer, run lifecycle persisted, SSE end-to-end in chat UI; one DeepAgent stage node proven inside the graph.
+6. **M6 — Market Entry pipeline:** Framing questionnaire (LangGraph node), Stage 1/2/3 DeepAgent nodes, Reviewer gates with conditional edges, Synthesis, Audit, citation enforcement, final report.
 7. **M7 — Polish:** AgentTrace UX, citation hover, report download, usage panel + cancel, README + screenshots.
-8. **M8 — V2 stubs:** M&A task type registered with placeholder supervisor.
+8. **M8 — V2 stubs:** M&A task type registered with a placeholder LangGraph + DeepAgent skeleton.
 
 ---
 
@@ -453,3 +505,4 @@ Rules:
 3. Should the run worker use **arq** (Redis-based, lightweight) as proposed, or do you prefer plain asyncio tasks in V1 (no Redis)?
 4. Is the **2-retry** gate cap correct, or should it be configurable per stage from Settings?
 5. For the **citation registry**, do you want to display source previews (snippet + accessed-at + favicon) inline on hover, or a dedicated Sources sidebar?
+6. Is the **LangGraph-vs-DeepAgents split in §6.4** correct (DeepAgents only inside Stage 1/2/3 research nodes; everything else as plain LangGraph LLM nodes), or do you want Framing/Reviewer/Synthesis/Audit also implemented as DeepAgents?
