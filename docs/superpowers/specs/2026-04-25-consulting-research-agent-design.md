@@ -59,7 +59,7 @@ V1 ships a **single end-to-end vertical slice**: the **Market Entry** consulting
 | Users | Single local user, no login |
 | API keys | Server-side, encrypted at rest with Fernet (key from env) |
 | Clarification UX | **One-shot upfront questionnaire** (no mid-run pauses) |
-| Sub-agent execution | **Staged waves with Reviewer quality gates**, max 2 retries per stage |
+| Sub-agent execution | **Staged waves with Reviewer quality gates**, retries per stage capped at a single global setting (default 2, configurable in Settings) |
 | Citations | **Mandatory inline citations**, auto-tracked evidence table, reviewer-enforced |
 | Guardrails | **Soft warnings + manual cancel only** in V1 (no hard caps) |
 
@@ -167,8 +167,9 @@ consulting_agents/
 │   │   │   ├── chunker.py
 │   │   │   └── embedder.py               # via LangChain Embeddings
 │   │   └── workers/
-│   │       ├── ingest_worker.py          # arq job: parse+chunk+embed
-│   │       └── run_worker.py             # arq job: invokes the LangGraph
+│   │       ├── ingest_worker.py          # asyncio task: parse+chunk+embed
+│   │       ├── run_worker.py             # asyncio task: invokes the LangGraph
+│   │       └── task_registry.py          # in-process registry of running tasks (cancel hooks)
 │   ├── alembic/
 │   ├── tests/
 │   └── pyproject.toml
@@ -183,7 +184,8 @@ consulting_agents/
 │   │   ├── QuestionnaireForm.tsx
 │   │   ├── ChatStream.tsx                # SSE consumer
 │   │   ├── AgentTrace.tsx
-│   │   ├── ReportView.tsx                # MD render + citation hover
+│   │   ├── ReportView.tsx                # MD render with citation links → Sources sidebar
+│   │   ├── SourcesSidebar.tsx            # evidence list, jump-to-citation
 │   │   └── UsagePanel.tsx                # tokens / cost / cancel
 │   ├── lib/api.ts
 │   └── package.json
@@ -280,8 +282,10 @@ class RunState(TypedDict, total=False):
 **Gate logic (conditional edges):** after each research stage node, the graph routes to a Reviewer node. The Reviewer's structured-output verdict drives a conditional edge:
 
 - `verdict.advance` → next stage
-- `verdict.reiterate` AND `attempts < 2` → back to the same stage node, with `target_agents` set so the DeepAgent reruns only those sub-topics
-- `verdict.reiterate` AND `attempts >= 2` → forced advance, gaps logged into `audit.md`
+- `verdict.reiterate` AND `attempts < settings.max_stage_retries` → back to the same stage node, with `target_agents` set so the DeepAgent reruns only those sub-topics
+- `verdict.reiterate` AND `attempts >= settings.max_stage_retries` → forced advance, gaps logged into `audit.md`
+
+`settings.max_stage_retries` is a single global value (default `2`) configurable from the Settings UI; it applies uniformly to every stage.
 
 **Checkpointing:** LangGraph's Postgres checkpointer (`langgraph-checkpoint-postgres`) persists graph state to the same DB. This gives us free crash-resume *between nodes* (we still don't auto-resume mid-tool-call in V1).
 
@@ -295,7 +299,7 @@ class RunState(TypedDict, total=False):
 ### 6.5 RAG ingestion pipeline
 
 1. `POST /documents` accepts file upload, stores binary under `/data/uploads/{doc_id}`, inserts a `documents` row with `status='pending'`.
-2. arq job picks it up: Docling → structured Markdown → token-aware chunker (target ~800 tokens, 100 overlap) → LangChain Embeddings (per active provider) → `chunks(embedding vector(N))`.
+2. An asyncio background task picks it up (registered via `task_registry`): Docling → structured Markdown → token-aware chunker (target ~800 tokens, 100 overlap) → LangChain Embeddings (per active provider) → `chunks(embedding vector(N))`.
 3. `documents.status` transitions `pending → parsing → embedding → ready` (or `failed` with error).
 4. `rag_search(query, doc_ids?)` performs cosine similarity (`<=>`) with optional filter by document scope.
 
@@ -304,8 +308,8 @@ class RunState(TypedDict, total=False):
 States: `created → questioning → running → cancelling → cancelled | completed | failed`.
 
 1. `POST /runs` with `{task_type, goal, document_ids[]}` → status `created`.
-2. Backend enqueues a short `framing_worker` arq job and returns immediately with status `questioning`. The worker invokes the Framing agent and writes the questionnaire artifact (`framing/questionnaire.json`); UI subscribes to SSE and renders the form once the `artifact_update` event for that path arrives.
-3. UI submits answers via `POST /runs/{id}/answers` → enqueues `run_worker` arq job → status `running`.
+2. Backend schedules a short `framing` asyncio task and returns immediately with status `questioning`. The task invokes the Framing node of the LangGraph and writes the questionnaire artifact (`framing/questionnaire.json`); UI subscribes to SSE and renders the form once the `artifact_update` event for that path arrives.
+3. UI submits answers via `POST /runs/{id}/answers` → schedules the `run` asyncio task that drives the rest of the LangGraph from the framing checkpoint → status `running`.
 4. Worker executes the staged pipeline, streaming events through Postgres `events` table; the SSE endpoint tails this table.
 5. Manual cancel via `POST /runs/{id}/cancel` sets status `cancelling`; the worker checks between stages and after each tool call, finalizes whatever exists, sets `cancelled`.
 6. On completion, `final_report.md` artifact exists, status `completed`.
@@ -410,7 +414,7 @@ The Reviewer is a LangGraph node (single LLM call with structured output via `wi
 Rules:
 
 - `verdict=reiterate` reruns only `target_agents` (not the whole stage).
-- Max 2 reiterations per stage. On the 3rd attempt the conditional edge force-advances and gaps are merged into `RunState` for `audit` to log.
+- Max `settings.max_stage_retries` reiterations per stage (default 2, global, configurable). On the next attempt the conditional edge force-advances and gaps are merged into `RunState` for `audit` to log.
 - Reviewer cannot ask the user questions; it works only with what is already in the run.
 
 ### 7.4 Synthesis and Audit
@@ -430,10 +434,11 @@ Rules:
 1. **Settings (first-run):** pick LLM provider + key, search provider + key, optional per-role model overrides. Keys POSTed to `/settings/providers` are encrypted at rest.
 2. **New Run:** task picker (Market Entry enabled, M&A disabled with "Coming soon"), goal text, optional document uploads (multi-file), submit → `POST /runs`.
 3. **Questionnaire:** UI renders the structured questionnaire returned by Framing (fields, types, helper text). Submit → `POST /runs/{id}/answers`, transitions to live view.
-4. **Run view (split layout):**
+4. **Run view (4-pane layout):**
    - **Left:** chat-style transcript (user goal, framing answers, stage narration).
-   - **Center:** **AgentTrace** — collapsible stage groups, per-agent activity, tool calls with queries and source titles, gate verdicts.
-   - **Right:** **ReportView** — live Markdown of `final_report.md` (or the latest stage artifacts before synthesis); citation tokens hover to show source.
+   - **Center-left:** **AgentTrace** — collapsible stage groups, per-agent activity, tool calls with queries and source titles, gate verdicts.
+   - **Center-right:** **ReportView** — live Markdown of `final_report.md` (or the latest stage artifacts before synthesis). Inline `[^src_id]` tokens are rendered as clickable chips that scroll/highlight the matching entry in the Sources sidebar.
+   - **Right:** **SourcesSidebar** — every evidence entry (title, URL, snippet, accessed-at, provider). Clicking an entry highlights all its inline citations in the report.
    - **Top-right:** **UsagePanel** — running tokens, est. cost, Cancel button.
 5. **Completion:** download `final_report.md`. Audit notes shown as a banner.
 
@@ -461,7 +466,7 @@ Rules:
 
 - **Tool errors** (search 5xx, fetch timeout, RAG empty): tool returns a structured error object; agent retries up to 2x with backoff, then proceeds noting the gap.
 - **LLM errors** (rate limit, provider outage): LangChain chat models are wrapped with `with_retry(stop_after_attempt=3, exponential_jitter=True)`. If a fallback model is configured for the role (`with_fallbacks`), it is tried next. If still failing, the LangGraph node returns a structured error; the conditional edge routes to a `node_failed` handler that logs an `error` event and either advances with a placeholder gap or, for Synthesis/Audit, marks the run `failed`.
-- **Reviewer infinite loops:** prevented by the hard cap of 2 retries per stage.
+- **Reviewer infinite loops:** prevented by the configurable global cap `settings.max_stage_retries` (default 2).
 - **Ingestion failures:** `documents.status='failed'` with error message; surfaced in UI.
 - **Worker crash mid-run:** on restart, the worker checks for `runs.status='running'` whose last event is older than N minutes and marks them `failed` (no automatic resume in V1).
 
@@ -472,13 +477,15 @@ Rules:
 - **Unit:** chunker, embedder, each search provider adapter (against recorded fixtures), Fernet wrap/unwrap, evidence registration, citation validator.
 - **Integration:** ingestion pipeline end-to-end on a small PDF; SSE replay from `Last-Event-ID`.
 - **Agent smoke test:** a `FakeChatModel` (LangChain `BaseChatModel` subclass) returns scripted JSON/Markdown keyed by agent role and stage attempt. The `PROVIDER_REGISTRY` exposes provider slug `fake` for tests. The smoke test invokes the LangGraph end-to-end, asserting: stage order, gate `advance`/`reiterate` decisions, retry caps (force-advance after 2), citation enforcement (uncited claim → reviewer reiterate), conditional-edge routing, and final report shape (required sections + non-empty Sources).
-- **Frontend:** component tests for `AgentTrace`, `ReportView` citation hover, `QuestionnaireForm` validation; one Playwright happy-path against the backend smoke run.
+- **Frontend:** component tests for `AgentTrace`, `ReportView` citation→sidebar linking, `SourcesSidebar` selection state, `QuestionnaireForm` validation; one Playwright happy-path against the backend smoke run.
 
 ---
 
 ## 12. Infra & Dev Experience
 
-- `infra/docker-compose.yml`: `postgres` (with pgvector extension), `redis` (for arq), `backend` (uvicorn), `worker` (arq), `frontend` (next dev).
+- `infra/docker-compose.yml`: `postgres` (with pgvector extension), `backend` (uvicorn — also runs background asyncio tasks in-process), `frontend` (next dev). **No Redis, no separate worker container in V1.**
+
+> **V1 single-process trade-off:** because background tasks run inside the FastAPI process, restarting the backend cancels in-flight runs. Resumption uses LangGraph Postgres checkpoints (a manual "resume run" action in V2). For V1 this is acceptable for a local/demo deployment.
 - `.env.example` covers `DATABASE_URL`, `REDIS_URL`, `FERNET_KEY`, default LLM provider + model, optional default search provider/key.
 - `make dev` brings everything up; seeds tasks catalog.
 - Pre-commit: ruff + black + mypy (backend); eslint + prettier (frontend).
@@ -493,16 +500,16 @@ Rules:
 4. **M4 — Web search:** Tavily/Exa/Perplexity adapters, provider switch in UI.
 5. **M5 — LangGraph harness + SSE:** minimal 2-node `StateGraph` with Postgres checkpointer, run lifecycle persisted, SSE end-to-end in chat UI; one DeepAgent stage node proven inside the graph.
 6. **M6 — Market Entry pipeline:** Framing questionnaire (LangGraph node), Stage 1/2/3 DeepAgent nodes, Reviewer gates with conditional edges, Synthesis, Audit, citation enforcement, final report.
-7. **M7 — Polish:** AgentTrace UX, citation hover, report download, usage panel + cancel, README + screenshots.
+7. **M7 — Polish:** AgentTrace UX, Sources sidebar with citation linking, report download, usage panel + cancel, README + screenshots.
 8. **M8 — V2 stubs:** M&A task type registered with a placeholder LangGraph + DeepAgent skeleton.
 
 ---
 
-## 14. Open Questions for User Review
+## 14. Resolved Decisions (post-review)
 
-1. Is **Markdown-only** export acceptable for V1, or is a basic PDF/print stylesheet required at launch?
-2. Are the suggested **default model roles** in §6.1 acceptable, or do you want to pin specific models in the spec?
-3. Should the run worker use **arq** (Redis-based, lightweight) as proposed, or do you prefer plain asyncio tasks in V1 (no Redis)?
-4. Is the **2-retry** gate cap correct, or should it be configurable per stage from Settings?
-5. For the **citation registry**, do you want to display source previews (snippet + accessed-at + favicon) inline on hover, or a dedicated Sources sidebar?
-6. Is the **LangGraph-vs-DeepAgents split in §6.4** correct (DeepAgents only inside Stage 1/2/3 research nodes; everything else as plain LangGraph LLM nodes), or do you want Framing/Reviewer/Synthesis/Audit also implemented as DeepAgents?
+1. **Export format:** Markdown only for V1. PDF/PPTX deferred.
+2. **Default model roles:** N/A — left to user configuration in Settings; no specific models pinned in the spec. Sensible role labels remain (framing/reviewer/research/synthesis/audit/embeddings).
+3. **Worker:** **No Redis in V1.** The run worker uses **plain asyncio background tasks** managed by FastAPI's lifespan + an in-process task registry. arq deferred to V2 when we need horizontal scale.
+4. **Gate retry cap:** **Configurable in Settings as a single global value** (default 2) that applies to all stages uniformly. No per-stage configuration in V1.
+5. **Citations UX:** **Dedicated Sources sidebar** (not inline hover). The sidebar lists every evidence entry with title, URL, snippet, accessed-at, and a "jump to citations in report" affordance. Inline `[^src_id]` tokens in the report scroll/highlight the corresponding sidebar entry.
+6. **Framework split:** Confirmed as designed in §6.4. **DeepAgents** = exploration / R&D / web research (Stage 1/2/3 research nodes — agent has freedom and flexibility). **LangGraph** = audit, review, synthesis, final response, and all deterministic control (gates, retries, advance/retry routing, checkpointing).
