@@ -1,0 +1,11 @@
+.env
+.venv
+__pycache__/
+*.pyc
+.DS_Store
+
+# Ignore stray docs/notes by default, but keep the spec tree
+docs/*
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
