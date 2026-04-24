@@ -14,6 +14,7 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import app.models  # noqa: F401  # register all ORM classes on Base.metadata
 from alembic import context
 from app.core.config import get_settings
 from app.core.db import Base
@@ -30,10 +31,10 @@ config.set_main_option("sqlalchemy.url", get_settings().database_url)
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Target metadata for 'autogenerate' support. All ORM models must be
-# imported (transitively) before this point so they register on
-# Base.metadata. For now there are no models yet — the baseline migration
-# is empty.
+# Target metadata for 'autogenerate' support. The `import app.models`
+# above explicitly loads every ORM class so they register on
+# `Base.metadata` before Alembic reads it. Importing `Base` alone is
+# NOT enough — model modules must actually be imported.
 target_metadata = Base.metadata
 
 

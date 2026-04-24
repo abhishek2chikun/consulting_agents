@@ -13,6 +13,12 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "cryptography>=43",
+    "langchain-core>=1.3.2",
+    "langchain-anthropic>=1.4.1",
+    "langchain-openai>=1.2.1",
+    "langchain-google-genai>=4.2.2",
+    "langchain-aws>=1.4.5",
+    "langchain-ollama>=1.1.0",
 ]
 
 [dependency-groups]
@@ -35,4 +41,10 @@ packages = ["app"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# All async tests share a single event loop so the module-level async
+# engine in `app.core.db` (created on whatever loop runs first) stays
+# valid across tests. Without this, the second test sees pooled
+# connections bound to a closed loop ("Event loop is closed").
+asyncio_default_test_loop_scope = "session"
+asyncio_default_fixture_loop_scope = "session"
 testpaths = ["tests"]
