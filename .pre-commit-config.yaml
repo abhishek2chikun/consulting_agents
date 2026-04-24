@@ -1,0 +1,80 @@
+# Pre-commit hooks for the Consulting Research Agent monorepo.
+#
+# Backend (Python) hooks run via `uv run` against the backend venv so they
+# pick up the same toolchain versions pinned in `backend/uv.lock` (avoids
+# the drift you get with `mirrors-mypy` / `additional_dependencies`).
+#
+# Frontend (TS/JS) hooks run via `pnpm` from `frontend/`. No JS/TS formatter
+# is configured yet — `eslint.config.mjs` carries no formatting rules. This
+# is a known gap for V1 scaffolding and will be revisited (likely add
+# prettier in M2 or later).
+#
+# Hook invocation styles:
+#   - Filename-passing hooks (ruff, ruff-format) use `uv --project backend run`
+#     from the repo root so the repo-relative paths pre-commit hands them
+#     (e.g. backend/app/main.py) resolve correctly.
+#   - Whole-tree hooks (mypy, eslint, tsc) use `bash -c 'cd <subtree> && ...'`
+#     because they ignore filenames and want their tool's CWD-based config
+#     discovery (tsconfig.json, mypy.ini, eslint.config.mjs).
+#
+# Setup (one-time, opt-in): `make precommit-install`
+# Manual run:                `cd backend && uv run pre-commit run --all-files`
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Lockfiles are tool-managed; reformatting them creates spurious diffs.
+        exclude: '\.lock$|^frontend/pnpm-lock\.yaml$'
+      - id: end-of-file-fixer
+        exclude: '\.lock$|^frontend/pnpm-lock\.yaml$'
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff (backend lint, auto-fix)
+        entry: uv --project backend run ruff check --fix
+        language: system
+        types_or: [python]
+        files: ^backend/
+        pass_filenames: true
+
+      - id: ruff-format
+        name: ruff-format (backend formatter)
+        entry: uv --project backend run ruff format
+        language: system
+        types_or: [python]
+        files: ^backend/
+        pass_filenames: true
+
+      - id: mypy
+        name: mypy (backend, strict, via uv venv)
+        # Run against the whole `app` package so cross-module types are
+        # checked together. Slower per-commit, but always uses the real
+        # uv-managed venv (no additional_dependencies drift).
+        entry: bash -c 'cd backend && uv run mypy app'
+        language: system
+        types: [python]
+        files: ^backend/
+        pass_filenames: false
+
+      - id: eslint
+        name: eslint (frontend)
+        entry: bash -c 'cd frontend && pnpm lint'
+        language: system
+        types_or: [ts, tsx, javascript, jsx]
+        files: ^frontend/
+        pass_filenames: false
+
+      - id: tsc
+        name: tsc --noEmit (frontend typecheck)
+        entry: bash -c 'cd frontend && pnpm typecheck'
+        language: system
+        types_or: [ts, tsx]
+        files: ^frontend/
+        pass_filenames: false
