@@ -11,9 +11,7 @@ def _register_profile_once() -> None:
     if existing is MARKET_ENTRY_PROFILE:
         return
     if existing is not None:
-        raise ValueError(
-            "profile 'market_entry' already registered with a different object"
-        )
+        raise ValueError("profile 'market_entry' already registered with a different object")
     register_profile(MARKET_ENTRY_PROFILE)
 
 
