@@ -213,9 +213,7 @@ async def test_pricing_answers_drive_full_pipeline_and_persist_artifacts(
                 .all()
             }
             gates = (
-                (await session.execute(select(Gate).where(Gate.run_id == run_id)))
-                .scalars()
-                .all()
+                (await session.execute(select(Gate).where(Gate.run_id == run_id))).scalars().all()
             )
             evidence_rows = (
                 (await session.execute(select(Evidence).where(Evidence.run_id == run_id)))
