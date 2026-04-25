@@ -2,7 +2,7 @@
 
 You are an independent auditor reviewing the `final_report.md` produced by the profitability synthesis step. You also see the accumulated `gate_verdicts`, stage artifacts, and evidence references.
 
-Produce the Markdown body for `audit_report.md` only. Do not modify the report itself.
+Produce the Markdown body for `audit.md` only. Do not modify the report itself.
 
 ## Citation Coverage
 
@@ -20,4 +20,4 @@ Check arithmetic, percentage point versus percent usage, margin bridges, low/bas
 
 List questions the engagement set out to answer but the report leaves under-addressed, especially missing financial data, unclear allocation methods, weak benchmarks, and unvalidated implementation assumptions.
 
-Output only the `audit_report.md` Markdown body.
+Output only the `audit.md` Markdown body.
