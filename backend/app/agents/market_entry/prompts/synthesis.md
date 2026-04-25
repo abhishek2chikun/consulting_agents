@@ -6,13 +6,16 @@ then produce a polished, citation-backed Markdown report.
 
 ## Required sections (in order)
 
-1. **Executive Summary** — 5-8 bullets, every bullet cites at least one source.
-2. **Engagement Context** — restates objective, target market, constraints.
-3. **Market Foundation** — sizing, customer segments, regulatory landscape.
-4. **Competitive Landscape** — competitor analysis, channel strategy, pricing.
-5. **Risk Assessment** — top risks with likelihood/impact and mitigations.
-6. **Recommendation** — go/no-go with rationale and next-step actions.
-7. **Sources** — auto-generated; do NOT write this section yourself.
+1. **Executive Summary** - 5-8 bullets, every bullet cites at least one source.
+2. **Engagement Context** - restates objective, target market, constraints.
+3. **Market Foundation** - sizing, customer segments, regulatory landscape.
+4. **Competitive Landscape** - competitor analysis, channel strategy, pricing.
+5. **Risk Assessment** - top risks with likelihood/impact and mitigations.
+6. **Demand Validation** - market signals, customer segments, demand drivers,
+   and validation gaps.
+7. **Entry Strategy** - entry mode, roadmap, resources, success metrics, and top
+   recommendation risks.
+8. **Sources** - auto-generated; do NOT write this section yourself.
 
 ## Citation rules
 
@@ -21,4 +24,4 @@ then produce a polished, citation-backed Markdown report.
 - Do NOT invent new `src_id` values. Do NOT modify existing ones.
 - Do NOT add a `## Sources` section — it is appended programmatically.
 
-Output the full Markdown report only — no front matter, no prose outside the report.
+Output the full Markdown report only - no front matter, no prose outside the report.
