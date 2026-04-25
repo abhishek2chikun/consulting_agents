@@ -11,6 +11,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents._engine.profile import ConsultingProfile
+from app.agents._engine.registry import get_profile
 from app.agents.ma import run_ma_stub
 from app.core.db import get_session
 from app.core.events import publish
@@ -61,12 +63,25 @@ async def get_run_model_factory_builder() -> ModelFactoryBuilder:
 ModelFactoryBuilderDep = Annotated[ModelFactoryBuilder, Depends(get_run_model_factory_builder)]
 
 
+def _profile_for_task_type(task_id: str) -> ConsultingProfile | None:
+    if task_id == "ma":
+        return None
+    profile = get_profile(task_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unknown task_type: {task_id}",
+        )
+    return profile
+
+
 @router.post("", response_model=CreateRunResponse, status_code=status.HTTP_201_CREATED)
 async def create_run(
     body: CreateRunRequest,
     session: SessionDep,
     factory_builder: ModelFactoryBuilderDep,
 ) -> CreateRunResponse:
+    profile = _profile_for_task_type(body.task_type)
     svc = RunService(session)
     try:
         run = await svc.create_run(
@@ -77,7 +92,7 @@ async def create_run(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    if run.task_id == "ma":
+    if profile is None:
         # M&A V2 stub — no framing step, no questionnaire, and crucially
         # no LLM calls (so no model factory needed). The single-node
         # graph writes `final_report.md` and transitions the run to
@@ -87,7 +102,7 @@ async def create_run(
         model_factory = await factory_builder(run.id)
         TASK_REGISTRY.spawn(
             f"run:{run.id}",
-            start_framing(run.id, model_factory=model_factory),
+            start_framing(run.id, profile=profile, model_factory=model_factory),
         )
     return CreateRunResponse(run_id=run.id)
 
@@ -102,6 +117,12 @@ async def submit_answers(
     run = await session.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    profile = _profile_for_task_type(run.task_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="task_type does not accept questionnaire answers",
+        )
 
     run.status = RunStatus.running
     await session.commit()
@@ -109,7 +130,7 @@ async def submit_answers(
     model_factory = await factory_builder(run_id)
     TASK_REGISTRY.spawn(
         f"run:{run_id}",
-        continue_after_framing(run_id, body.answers, model_factory=model_factory),
+        continue_after_framing(run_id, body.answers, profile=profile, model_factory=model_factory),
     )
 
 

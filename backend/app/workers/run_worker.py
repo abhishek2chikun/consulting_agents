@@ -26,9 +26,10 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from app.agents._engine.graph import build_consulting_graph
+from app.agents._engine.profile import ConsultingProfile
 from app.agents.budget import BudgetTracker
 from app.agents.llm import get_chat_model, provider_name_for
-from app.agents.market_entry.graph import build_full_graph
 from app.agents.market_entry.nodes.framing import build_framing_node
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
@@ -68,9 +69,8 @@ async def default_model_factory(run_id: uuid.UUID | None = None) -> ModelFactory
     """Resolve real chat models for every role and return a sync factory.
 
     All five roles are resolved up-front so the synchronous
-    ``model_factory(role)`` callback expected by ``build_full_graph``
-    can return a cached instance per role without hitting the DB during
-    graph compilation.
+    ``model_factory(role)`` callback expected by graph compilation can
+    return a cached instance per role without hitting the DB.
 
     When ``run_id`` is provided, each resolved model is wrapped with a
     :class:`BudgetTracker` callback bound to that run, so every chat
@@ -103,6 +103,7 @@ async def default_model_factory(run_id: uuid.UUID | None = None) -> ModelFactory
 async def start_framing(
     run_id: uuid.UUID,
     *,
+    profile: ConsultingProfile,
     model_factory: ModelFactory | None = None,
 ) -> None:
     """Run only the framing node so the questionnaire is ready to render."""
@@ -115,7 +116,7 @@ async def start_framing(
         goal = run.goal
         document_ids = (run.model_snapshot or {}).get("document_ids", []) or []
 
-    node = build_framing_node(model=factory("framing"))
+    node = build_framing_node(model=factory("framing"), profile=profile)
     try:
         await node(
             {
@@ -139,6 +140,7 @@ async def continue_after_framing(
     run_id: uuid.UUID,
     answers: dict[str, str],
     *,
+    profile: ConsultingProfile,
     model_factory: ModelFactory | None = None,
 ) -> None:
     """Persist answers and drive the full pipeline through audit."""
@@ -170,7 +172,8 @@ async def continue_after_framing(
 
     # 3. Compile the graph WITHOUT the framing node and stream node-by-node
     #    so we can poll Run.status between nodes for cooperative cancel.
-    graph = build_full_graph(
+    graph = build_consulting_graph(
+        profile,
         model_factory=factory,
         checkpointer=None,
         include_framing=False,
