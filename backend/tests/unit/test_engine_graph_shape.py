@@ -22,6 +22,10 @@ def test_market_entry_graph_compiles() -> None:
         "reviewer_stage2_competitive",
         "stage3_risk",
         "reviewer_stage3_risk",
+        "stage4_demand",
+        "reviewer_stage4_demand",
+        "stage5_strategy",
+        "reviewer_stage5_strategy",
         "synthesis",
         "audit",
     }

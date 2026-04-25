@@ -92,8 +92,9 @@ async def test_full_graph_runs_end_to_end_with_one_stage2_reiterate(
     # Per-role scripted models. We need to pre-script every call the
     # graph will make:
     #   framing  : 1 structured call
-    #   research : stage1, stage2 (1st), stage2 (reiterate), stage3 → 4 calls
-    #   reviewer : stage1, stage2 (1st=reiterate), stage2 (2nd=advance), stage3 → 4 calls
+    #   research : stage1, stage2 (1st), stage2 (reiterate), stage3, stage4, stage5 -> 6 calls
+    #   reviewer : stage1, stage2 (reiterate), stage2 (advance), stage3,
+    #              stage4, stage5 -> 6 calls
     #   synthesis: 1 plain text call
     #   audit    : 1 plain text call
     framing_model = FakeChatModel(structured_responses=[framing_response])
@@ -103,6 +104,8 @@ async def test_full_graph_runs_end_to_end_with_one_stage2_reiterate(
             _stage_payload("stage2_competitive", "s2"),
             _stage_payload("stage2_competitive", "s2b"),
             _stage_payload("stage3_risk", "s3"),
+            _stage_payload("stage4_demand", "s4"),
+            _stage_payload("stage5_strategy", "s5"),
         ]
     )
     reviewer_model = FakeChatModel(
@@ -111,6 +114,8 @@ async def test_full_graph_runs_end_to_end_with_one_stage2_reiterate(
             _gate_payload("stage2_competitive", "reiterate", ["pricing"]),
             _gate_payload("stage2_competitive", "advance"),
             _gate_payload("stage3_risk", "advance"),
+            _gate_payload("stage4_demand", "advance"),
+            _gate_payload("stage5_strategy", "advance"),
         ]
     )
     report_body = (
@@ -119,6 +124,8 @@ async def test_full_graph_runs_end_to_end_with_one_stage2_reiterate(
         "- Foundation finding [^s1].\n"
         "- Competitive finding [^s2b].\n"
         "- Risk finding [^s3].\n"
+        "- Demand finding [^s4].\n"
+        "- Strategy finding [^s5].\n"
     )
     synthesis_model = FakeChatModel(responses=[report_body])
     audit_model = FakeChatModel(
@@ -178,12 +185,14 @@ async def test_full_graph_runs_end_to_end_with_one_stage2_reiterate(
     assert "stage1_foundation/findings.md" in artifact_paths
     assert "stage2_competitive/findings.md" in artifact_paths
     assert "stage3_risk/findings.md" in artifact_paths
+    assert "stage4_demand/findings.md" in artifact_paths
+    assert "stage5_strategy/findings.md" in artifact_paths
     assert "final_report.md" in artifact_paths
     assert "audit.md" in artifact_paths
-    # 4 gate decisions written
-    assert gate_count == 4
-    # 4 distinct src_ids cited
-    assert evidence_count == 4
+    # 6 gate decisions written
+    assert gate_count == 6
+    # 6 distinct src_ids cited
+    assert evidence_count == 6
     assert run is not None
     assert run.status == RunStatus.completed
 

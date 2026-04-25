@@ -11,9 +11,17 @@ def test_profile_registered() -> None:
     assert PROFILE_REGISTRY.get("market_entry") is MARKET_ENTRY_PROFILE
 
 
-def test_profile_has_three_stages_today() -> None:
-    # Will become 5 in Task 7 (stage expansion).
-    assert len(MARKET_ENTRY_PROFILE.stages) == 3
+def test_profile_has_five_stages() -> None:
+    assert [
+        (stage.slug, stage.node_name, stage.next_stage_node)
+        for stage in MARKET_ENTRY_PROFILE.stages
+    ] == [
+        ("stage1_foundation", "stage1_foundation", "stage2_competitive"),
+        ("stage2_competitive", "stage2_competitive", "stage3_risk"),
+        ("stage3_risk", "stage3_risk", "stage4_demand"),
+        ("stage4_demand", "stage4_demand", "stage5_strategy"),
+        ("stage5_strategy", "stage5_strategy", "synthesis"),
+    ]
 
 
 def test_profile_loads_framing_prompt() -> None:
