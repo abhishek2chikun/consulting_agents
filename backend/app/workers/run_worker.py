@@ -1,69 +1,119 @@
-"""Background run worker entrypoints (M5.5 framing skeleton)."""
+"""Background run worker — drives the market-entry LangGraph (M6.11).
+
+Two entrypoints:
+
+* :func:`start_framing` — invokes only the framing node so the user can
+  see and answer the questionnaire before the (expensive) research
+  pipeline kicks off. Leaves the run in ``RunStatus.questioning``.
+
+* :func:`continue_after_framing` — persists the human-supplied answers
+  and drives the full pipeline (stages → reviewers → synthesis →
+  audit). It steps via ``astream()`` so a cooperative cancel
+  (``Run.status -> cancelling``) takes effect at the next node
+  boundary.
+
+Both accept an injectable ``model_factory`` (one chat model per role:
+``framing|research|reviewer|synthesis|audit``). When omitted the
+default factory resolves real chat models from settings via
+:func:`app.agents.llm.get_chat_model`.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
 import uuid
+from collections.abc import Awaitable, Callable
+from typing import Any
 
-from sqlalchemy import select
-
+from app.agents.llm import get_chat_model
+from app.agents.market_entry.graph import build_full_graph
+from app.agents.market_entry.nodes.framing import build_framing_node
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
-from app.models import Artifact, Message, MessageRole, Run, RunStatus
+from app.models import Message, MessageRole, Run, RunStatus
 
-QUESTIONNAIRE_PATH = "framing/questionnaire.json"
-QUESTIONNAIRE_CONTENT = json.dumps(
-    {
-        "items": [
-            {
-                "id": "target_market",
-                "label": "Target market",
-                "type": "text",
-                "required": True,
-                "helper": "Specify geography + segment",
-            },
-            {
-                "id": "time_horizon",
-                "label": "Time horizon",
-                "type": "text",
-                "required": True,
-            },
-        ]
-    }
-)
+ModelFactory = Callable[[str], object]
+ModelFactoryFactory = Callable[[], Awaitable[ModelFactory]]
+
+logger = logging.getLogger(__name__)
 
 
-async def start_framing(run_id: uuid.UUID) -> None:
-    """Seed questionnaire artifact and publish artifact_update event."""
+# ---------------------------------------------------------------------------
+# Default model factory
+# ---------------------------------------------------------------------------
+
+
+async def default_model_factory() -> ModelFactory:
+    """Resolve real chat models for every role and return a sync factory.
+
+    All five roles are resolved up-front so the synchronous
+    ``model_factory(role)`` callback expected by ``build_full_graph``
+    can return a cached instance per role without hitting the DB during
+    graph compilation.
+    """
+    roles = ("framing", "research", "reviewer", "synthesis", "audit")
+    cache: dict[str, object] = {}
+    async with AsyncSessionLocal() as session:
+        for role in roles:
+            cache[role] = await get_chat_model(role, session=session)
+
+    def _factory(role: str) -> object:
+        return cache[role]
+
+    return _factory
+
+
+# ---------------------------------------------------------------------------
+# start_framing
+# ---------------------------------------------------------------------------
+
+
+async def start_framing(
+    run_id: uuid.UUID,
+    *,
+    model_factory: ModelFactory | None = None,
+) -> None:
+    """Run only the framing node so the questionnaire is ready to render."""
+    factory = model_factory or await default_model_factory()
+
     async with AsyncSessionLocal() as session:
         run = await session.get(Run, run_id)
         if run is None:
             return
+        goal = run.goal
+        document_ids = (run.model_snapshot or {}).get("document_ids", []) or []
 
-        existing = (
-            await session.execute(
-                select(Artifact).where(
-                    Artifact.run_id == run_id,
-                    Artifact.path == QUESTIONNAIRE_PATH,
-                )
-            )
-        ).scalar_one_or_none()
-        if existing is None:
-            session.add(
-                Artifact(
-                    run_id=run_id,
-                    path=QUESTIONNAIRE_PATH,
-                    kind="json",
-                    content=QUESTIONNAIRE_CONTENT,
-                )
-            )
-            await session.commit()
-
-    await publish(run_id, "artifact_update", {"path": QUESTIONNAIRE_PATH}, agent="framing")
+    node = build_framing_node(model=factory("framing"))
+    try:
+        await node(
+            {
+                "run_id": str(run_id),
+                "goal": goal,
+                "document_ids": list(document_ids),
+            }
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("framing node failed for run %s", run_id)
+        await _mark_failed(run_id, reason=str(exc))
+        return
 
 
-async def continue_after_framing(run_id: uuid.UUID, answers: dict[str, str]) -> None:
-    """Persist answers and mark run as running."""
+# ---------------------------------------------------------------------------
+# continue_after_framing
+# ---------------------------------------------------------------------------
+
+
+async def continue_after_framing(
+    run_id: uuid.UUID,
+    answers: dict[str, str],
+    *,
+    model_factory: ModelFactory | None = None,
+) -> None:
+    """Persist answers and drive the full pipeline through audit."""
+    factory = model_factory or await default_model_factory()
+
+    # 1. Persist answers as a single user-role message (audit trail).
     async with AsyncSessionLocal() as session:
         run = await session.get(Run, run_id)
         if run is None:
@@ -77,8 +127,95 @@ async def continue_after_framing(run_id: uuid.UUID, answers: dict[str, str]) -> 
             )
         )
         await session.commit()
+        goal = run.goal
 
-    await publish(run_id, "answers_received", {"count": len(answers)}, agent="framing")
+    # 2. Build the framing brief from goal + answers (no second LLM call).
+    framing_brief = {
+        "objective": goal,
+        "target_market": str(answers.get("target_market", "")) or "unspecified",
+        "constraints": [],
+        "questionnaire_answers": dict(answers),
+    }
+
+    # 3. Compile the graph WITHOUT the framing node and stream node-by-node
+    #    so we can poll Run.status between nodes for cooperative cancel.
+    graph = build_full_graph(
+        model_factory=factory,
+        checkpointer=None,
+        include_framing=False,
+    )
+
+    initial: dict[str, Any] = {
+        "run_id": str(run_id),
+        "goal": goal,
+        "framing": framing_brief,
+    }
+
+    cancelled = False
+    try:
+        async for _chunk in graph.astream(initial):
+            # Each chunk is a {node_name: state_update} dict yielded after
+            # a node completes. Check for cooperative cancel before
+            # entering the next node.
+            if await _run_is_cancelling(run_id):
+                cancelled = True
+                break
+    except Exception as exc:
+        logger.exception("graph execution failed for run %s", run_id)
+        await _mark_failed(run_id, reason=str(exc))
+        return
+
+    if cancelled:
+        await _mark_cancelled(run_id)
+        return
+
+    # The audit node is responsible for transitioning Run.status ->
+    # completed. If it didn't (e.g. graph short-circuited via a routing
+    # bug), surface that as a failure rather than silently leaving the
+    # run in `running`.
+    async with AsyncSessionLocal() as session:
+        run = await session.get(Run, run_id)
+        if run is not None and run.status == RunStatus.running:
+            await _mark_failed(
+                run_id,
+                reason="graph completed without transitioning Run.status",
+            )
 
 
-__all__ = ["continue_after_framing", "start_framing"]
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+async def _run_is_cancelling(run_id: uuid.UUID) -> bool:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(Run, run_id)
+        return run is not None and run.status == RunStatus.cancelling
+
+
+async def _mark_cancelled(run_id: uuid.UUID) -> None:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(Run, run_id)
+        if run is None:
+            return
+        run.status = RunStatus.cancelled
+        await session.commit()
+    await publish(run_id, "run_cancelled", {"reason": "user_request"}, agent="system")
+
+
+async def _mark_failed(run_id: uuid.UUID, *, reason: str) -> None:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(Run, run_id)
+        if run is None:
+            return
+        run.status = RunStatus.failed
+        await session.commit()
+    await publish(run_id, "run_failed", {"reason": reason}, agent="system")
+
+
+__all__ = [
+    "ModelFactory",
+    "continue_after_framing",
+    "default_model_factory",
+    "start_framing",
+]

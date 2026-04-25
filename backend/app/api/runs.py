@@ -23,15 +23,38 @@ from app.schemas.runs import (
     SubmitAnswersRequest,
 )
 from app.services.run_service import RunService
-from app.workers.run_worker import continue_after_framing, start_framing
+from app.workers.run_worker import (
+    ModelFactory,
+    continue_after_framing,
+    default_model_factory,
+    start_framing,
+)
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
+async def get_run_model_factory() -> ModelFactory:
+    """Resolve the per-role chat-model factory used by the run worker.
+
+    Production wiring resolves real chat models from the encrypted
+    settings store. Tests override this dependency via
+    `app.dependency_overrides[get_run_model_factory]` to inject a
+    `FakeChatModel`-backed factory and avoid network calls / API keys.
+    """
+    return await default_model_factory()
+
+
+ModelFactoryDep = Annotated[ModelFactory, Depends(get_run_model_factory)]
+
+
 @router.post("", response_model=CreateRunResponse, status_code=status.HTTP_201_CREATED)
-async def create_run(body: CreateRunRequest, session: SessionDep) -> CreateRunResponse:
+async def create_run(
+    body: CreateRunRequest,
+    session: SessionDep,
+    model_factory: ModelFactoryDep,
+) -> CreateRunResponse:
     svc = RunService(session)
     try:
         run = await svc.create_run(
@@ -42,7 +65,10 @@ async def create_run(body: CreateRunRequest, session: SessionDep) -> CreateRunRe
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    TASK_REGISTRY.spawn(f"run:{run.id}", start_framing(run.id))
+    TASK_REGISTRY.spawn(
+        f"run:{run.id}",
+        start_framing(run.id, model_factory=model_factory),
+    )
     return CreateRunResponse(run_id=run.id)
 
 
@@ -51,6 +77,7 @@ async def submit_answers(
     run_id: uuid.UUID,
     body: SubmitAnswersRequest,
     session: SessionDep,
+    model_factory: ModelFactoryDep,
 ) -> None:
     run = await session.get(Run, run_id)
     if run is None:
@@ -59,7 +86,10 @@ async def submit_answers(
     run.status = RunStatus.running
     await session.commit()
 
-    TASK_REGISTRY.spawn(f"run:{run_id}", continue_after_framing(run_id, body.answers))
+    TASK_REGISTRY.spawn(
+        f"run:{run_id}",
+        continue_after_framing(run_id, body.answers, model_factory=model_factory),
+    )
 
 
 @router.post("/{run_id}/cancel", status_code=status.HTTP_204_NO_CONTENT)

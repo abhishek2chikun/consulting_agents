@@ -1,16 +1,23 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { toast } from "sonner";
 
 import { ChatStream } from "@/components/ChatStream";
+import { QuestionnaireForm } from "@/components/QuestionnaireForm";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { cancelRun, getRun, submitRunAnswers } from "@/lib/api";
-import type { RunInfoResponse } from "@/lib/types";
+import {
+  cancelRun,
+  getRun,
+  getRunArtifact,
+  submitRunAnswers,
+} from "@/lib/api";
+import { useEventStream } from "@/lib/sse";
+import type { QuestionnaireSchema, RunInfoResponse } from "@/lib/types";
+
+const QUESTIONNAIRE_PATH = "framing/questionnaire.json";
 
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -22,10 +29,15 @@ export default function RunPage() {
   const runId = params.id;
 
   const [runInfo, setRunInfo] = useState<RunInfoResponse | null>(null);
-  const [answerValue, setAnswerValue] = useState("");
+  const [questionnaire, setQuestionnaire] = useState<QuestionnaireSchema | null>(
+    null,
+  );
+  const [answersSubmitted, setAnswersSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const refresh = async () => {
+  const { events, status } = useEventStream(runId);
+
+  const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const next = await getRun(runId);
@@ -35,13 +47,58 @@ export default function RunPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [runId]);
 
-  const bootstrapped = useRef<boolean | null>(null);
-  if (bootstrapped.current == null) {
+  const loadQuestionnaire = useCallback(async () => {
+    try {
+      const artifact = await getRunArtifact(runId, QUESTIONNAIRE_PATH);
+      const parsed = JSON.parse(artifact.content) as QuestionnaireSchema;
+      setQuestionnaire(parsed);
+    } catch (err) {
+      toast.error(`Could not load questionnaire: ${errorMessage(err)}`);
+    }
+  }, [runId]);
+
+  // Initial bootstrap on mount.
+  const bootstrapped = useRef(false);
+  useEffect(() => {
+    if (bootstrapped.current) return;
     bootstrapped.current = true;
     void refresh();
-  }
+    // Try loading any pre-existing questionnaire (resume case).
+    void getRunArtifact(runId, QUESTIONNAIRE_PATH)
+      .then((artifact) => {
+        setQuestionnaire(JSON.parse(artifact.content) as QuestionnaireSchema);
+      })
+      .catch(() => {
+        // Not yet produced; SSE will trigger fetch when ready.
+      });
+  }, [refresh, runId]);
+
+  // Derive the most recent artifact_update event id targeting the
+  // questionnaire path. Pure function of `events` — no refs in render.
+  const latestQuestionnaireEventId = useMemo(() => {
+    let latest = 0;
+    for (const evt of events) {
+      if (
+        evt.type === "artifact_update" &&
+        (evt.payload as { path?: string }).path === QUESTIONNAIRE_PATH &&
+        evt.id > latest
+      ) {
+        latest = evt.id;
+      }
+    }
+    return latest;
+  }, [events]);
+
+  useEffect(() => {
+    if (latestQuestionnaireEventId > 0) {
+      // Synchronizing to an external system (the questionnaire artifact
+      // backed by Postgres + SSE) — fetch is intentional here.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void loadQuestionnaire();
+    }
+  }, [latestQuestionnaireEventId, loadQuestionnaire]);
 
   const artifactSummary = useMemo(() => {
     if (runInfo === null) return "Loading…";
@@ -49,15 +106,11 @@ export default function RunPage() {
     return runInfo.artifact_paths.join("\n");
   }, [runInfo]);
 
-  const submitAnswers = async () => {
-    if (answerValue.trim().length === 0) {
-      toast.error("Enter at least one answer");
-      return;
-    }
+  const handleAnswers = async (answers: Record<string, string>) => {
     try {
-      await submitRunAnswers(runId, { freeform: answerValue.trim() });
+      await submitRunAnswers(runId, answers);
       toast.success("Answers submitted");
-      setAnswerValue("");
+      setAnswersSubmitted(true);
       await refresh();
     } catch (err) {
       toast.error(errorMessage(err));
@@ -79,7 +132,7 @@ export default function RunPage() {
       <header>
         <h1 className="text-3xl font-semibold tracking-tight">Run {runId}</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Minimal run view (M5.7): metadata + SSE event stream.
+          Run view (M6.3): metadata, framing questionnaire, and SSE event stream.
         </p>
       </header>
 
@@ -105,21 +158,27 @@ export default function RunPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Submit answers</CardTitle>
+          <CardTitle>Framing questionnaire</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <Label htmlFor="answers">Freeform answer</Label>
-          <Input
-            id="answers"
-            value={answerValue}
-            onChange={(e) => setAnswerValue(e.target.value)}
-            placeholder="e.g. Focus on enterprise segment in EU"
-          />
-          <Button onClick={() => void submitAnswers()}>Submit answers</Button>
+        <CardContent>
+          {questionnaire === null ? (
+            <p className="text-sm text-muted-foreground">
+              Waiting for the framing agent to produce the questionnaire…
+            </p>
+          ) : answersSubmitted ? (
+            <p className="text-sm text-muted-foreground">
+              Answers submitted. The research agents are now working.
+            </p>
+          ) : (
+            <QuestionnaireForm
+              schema={questionnaire}
+              onSubmit={handleAnswers}
+            />
+          )}
         </CardContent>
       </Card>
 
-      <ChatStream runId={runId} />
+      <ChatStream runId={runId} events={events} status={status} />
     </main>
   );
 }

@@ -102,3 +102,26 @@ export interface RunInfoResponse {
   status: string;
   artifact_paths: string[];
 }
+
+export interface ArtifactContentResponse {
+  path: string;
+  kind: string;
+  content: string;
+}
+
+/**
+ * Mirrors `app/schemas/framing.py::QuestionItem`.
+ * Rendered by `<QuestionnaireForm>`.
+ */
+export interface QuestionnaireItem {
+  id: string;
+  label: string;
+  type: "text" | "select" | "multiselect";
+  options?: string[];
+  helper?: string | null;
+  required: boolean;
+}
+
+export interface QuestionnaireSchema {
+  items: QuestionnaireItem[];
+}
