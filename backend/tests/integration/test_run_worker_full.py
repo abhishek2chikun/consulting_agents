@@ -21,6 +21,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
+from app.agents.market_entry.profile import MARKET_ENTRY_PROFILE
 from app.core.db import AsyncSessionLocal
 from app.models import (
     SINGLETON_USER_ID,
@@ -200,7 +201,7 @@ async def test_start_framing_runs_node_and_persists_questionnaire(
         }
     )
 
-    await start_framing(fresh_run, model_factory=factory)
+    await start_framing(fresh_run, profile=MARKET_ENTRY_PROFILE, model_factory=factory)
 
     async with AsyncSessionLocal() as session:
         artifact = (
@@ -250,6 +251,7 @@ async def test_continue_after_framing_drives_full_pipeline_to_completed(
     await continue_after_framing(
         fresh_run,
         answers={"time_horizon": "12 months"},
+        profile=MARKET_ENTRY_PROFILE,
         model_factory=factory,
     )
 
@@ -331,6 +333,7 @@ async def test_continue_after_framing_honors_cooperative_cancel(
         await continue_after_framing(
             fresh_run,
             answers={"time_horizon": "12 months"},
+            profile=MARKET_ENTRY_PROFILE,
             model_factory=factory,
         )
     finally:
