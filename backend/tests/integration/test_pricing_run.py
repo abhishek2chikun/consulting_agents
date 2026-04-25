@@ -14,7 +14,7 @@ from sqlalchemy import delete, select
 from app.api.runs import get_run_model_factory_builder
 from app.core.db import AsyncSessionLocal
 from app.main import create_app
-from app.models import Artifact, Message, Run, RunStatus
+from app.models import Artifact, Evidence, Gate, Message, Run, RunStatus
 from app.testing.fake_chat_model import FakeChatModel
 from app.workers.run_worker import ModelFactory
 
@@ -94,7 +94,8 @@ def _fresh_factory() -> ModelFactory:
         "synthesis": FakeChatModel(
             responses=[
                 "# Pricing Final Report\n\n## Executive Summary\n"
-                "- Value, segments, competition, models, and rollout findings [^pr1].\n"
+                "- Value, segments, competition, models, and rollout findings "
+                "[^pr1] [^pr2] [^pr3] [^pr4] [^pr5].\n"
             ]
         ),
         "audit": FakeChatModel(
@@ -180,6 +181,14 @@ async def test_pricing_answers_drive_full_pipeline_and_persist_artifacts(
     assert create.status_code == 201, create.text
     run_id = uuid.UUID(create.json()["run_id"])
 
+    stage_slugs = [
+        "stage1_value",
+        "stage2_segments",
+        "stage3_competitive",
+        "stage4_models",
+        "stage5_rollout",
+    ]
+
     try:
         await _wait_for_artifact_path(client, run_id, "framing/questionnaire.json")
 
@@ -203,13 +212,31 @@ async def test_pricing_answers_drive_full_pipeline_and_persist_artifacts(
                 .scalars()
                 .all()
             }
+            gates = (
+                (await session.execute(select(Gate).where(Gate.run_id == run_id)))
+                .scalars()
+                .all()
+            )
+            evidence_rows = (
+                (await session.execute(select(Evidence).where(Evidence.run_id == run_id)))
+                .scalars()
+                .all()
+            )
 
         assert len(messages) == 1
-        assert "stage1_value/findings.md" in artifact_paths
-        assert "stage2_segments/findings.md" in artifact_paths
-        assert "stage3_competitive/findings.md" in artifact_paths
-        assert "stage4_models/findings.md" in artifact_paths
-        assert "stage5_rollout/findings.md" in artifact_paths
+        assert len(gates) == 5
+        assert {gate.stage for gate in gates} == set(stage_slugs)
+        assert [gate.verdict for gate in gates] == ["advance"] * 5
+        assert {evidence.src_id for evidence in evidence_rows} == {
+            "pr1",
+            "pr2",
+            "pr3",
+            "pr4",
+            "pr5",
+        }
+        assert len(evidence_rows) == 5
+        for stage_slug in stage_slugs:
+            assert f"{stage_slug}/findings.md" in artifact_paths
         assert "final_report.md" in artifact_paths
         assert "audit.md" in artifact_paths
 
@@ -218,6 +245,8 @@ async def test_pricing_answers_drive_full_pipeline_and_persist_artifacts(
         parsed = artifact.json()
         assert parsed["path"] == "final_report.md"
         assert "Pricing Final Report" in parsed["content"]
+        for index in range(1, 6):
+            assert f"[^pr{index}]" in parsed["content"]
         json.dumps(parsed)
     finally:
         await _cleanup_run(run_id)

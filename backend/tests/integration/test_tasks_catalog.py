@@ -1,10 +1,4 @@
-"""Integration tests for the tasks catalog API (M3.1).
-
-Pins the seeded contents of `task_types`: V1 ships `market_entry`
-(enabled) and `ma` (disabled stub for V2). The endpoint returns a bare
-list ordered by slug; the frontend renders it as the task picker on the
-"new run" page.
-"""
+"""Integration tests for the enabled multi-type tasks catalog API."""
 
 from __future__ import annotations
 
