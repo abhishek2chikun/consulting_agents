@@ -37,4 +37,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Downgrade schema."""
-    op.execute(sa.text("DELETE FROM task_types WHERE slug = 'profitability'"))
+    op.execute(sa.text("UPDATE task_types SET enabled = false WHERE slug = 'profitability'"))
