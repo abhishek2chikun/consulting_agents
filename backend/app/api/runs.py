@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.agents  # noqa: F401  # populate PROFILE_REGISTRY with built-in profiles
 from app.agents._engine.profile import ConsultingProfile
 from app.agents._engine.registry import get_profile
 from app.agents.ma import run_ma_stub
