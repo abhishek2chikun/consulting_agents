@@ -26,7 +26,7 @@ async def _drain_ingest_tasks() -> AsyncIterator[None]:
     """After every integration test, wait for (or cancel) ingest tasks."""
     yield
     # Snapshot so we don't iterate while the registry mutates underneath us.
-    keys = [k for k in TASK_REGISTRY.keys() if k.startswith("ingest:")]
+    keys = [k for k in TASK_REGISTRY.keys() if k.startswith("ingest:") or k.startswith("run:")]
     for k in keys:
         task = TASK_REGISTRY.get(k)
         if task is None or task.done():

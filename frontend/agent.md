@@ -113,10 +113,11 @@ curl -s http://localhost:3000 | grep "Consulting Research Agent"
 
 - **M1.2 ✅** — Next.js 16 + Tailwind v4 + shadcn scaffold, placeholder landing page with build-info card. Lint/typecheck/build all clean. Heading verified in rendered HTML.
 - **M2.7 ✅** — Settings UI at `/settings` (4 sections: LLM provider keys with `has_key` badges, per-role model overrides with Test-connection ping, search-provider radio + per-key inputs, max stage retries 1..5). New `lib/api.ts` (typed fetch wrapper + `ApiRequestError`) and `lib/types.ts` (DTO mirrors of `backend/app/schemas/{settings,ping}.py`). Backend: CORS middleware allowing `http://localhost:3000` (V1 single-user local dev). shadcn additions: label, select, radio-group, separator, badge. Sonner `<Toaster />` mounted in `app/layout.tsx`. Smoke-verified: `PUT /settings/providers/anthropic` flips `has_key` to true, `PUT /settings/max_stage_retries` with `99` returns 422, full settings snapshot persists.
+- **M4.7 ✅ (partial UI target)** — Search section now includes a **Test search** button calling backend `GET /health/search?q=test`, with toast output of top titles. Added `testSearchProvider()` in `lib/api.ts` and `SearchHealthResponse` type in `lib/types.ts`. This validates provider selection + key wiring without requiring a full agent run.
 
 ## Deferred work
 
-- Search-provider selector UI refinement (M4.7 — currently has a stub)
+- Search-provider selector UX polish (M4.7 follow-up — currently functional but minimal)
 - Run view + SSE consumer + `lib/sse.ts` (M5.7)
 - Clarifying-questions form (M6.3)
 - AgentTrace, ReportView, SourcesSidebar, UsagePanel components (M7.2–M7.5)

@@ -1,34 +1,73 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+"use client";
 
-const BUILD_INFO = {
-  app: "Consulting Research Agent",
-  milestone: "M1.2 — Frontend scaffold",
-  next: "16.2.4",
-  react: "19.2.4",
-  node: process.version,
-  env: process.env.NODE_ENV ?? "unknown",
-} as const;
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
+
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { createRun } from "@/lib/api";
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
 
 export default function Home() {
-  return (
-    <main className="min-h-screen flex flex-col items-center justify-center gap-8 p-8 bg-background text-foreground">
-      <h1 className="text-4xl font-semibold tracking-tight">
-        Consulting Research Agent
-      </h1>
+  const router = useRouter();
+  const [goal, setGoal] = useState("");
+  const [starting, setStarting] = useState(false);
 
-      <Card className="w-full max-w-md">
+  const start = async () => {
+    if (goal.trim().length === 0) {
+      toast.error("Goal is required");
+      return;
+    }
+    setStarting(true);
+    try {
+      const created = await createRun({
+        task_type: "market_entry",
+        goal: goal.trim(),
+        document_ids: [],
+      });
+      toast.success("Run created");
+      router.push(`/runs/${created.run_id}`);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  return (
+    <main className="mx-auto max-w-3xl p-8 space-y-6">
+      <header>
+        <h1 className="text-3xl font-semibold tracking-tight">Consulting Research Agent</h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          Start a new Market Entry run (M5.7 minimal UI).
+        </p>
+      </header>
+
+      <Card>
         <CardHeader>
-          <CardTitle>Build info</CardTitle>
+          <CardTitle>New run</CardTitle>
         </CardHeader>
-        <CardContent>
-          <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
-            {Object.entries(BUILD_INFO).map(([k, v]) => (
-              <div key={k} className="contents">
-                <dt className="font-medium text-muted-foreground">{k}</dt>
-                <dd className="font-mono">{String(v)}</dd>
-              </div>
-            ))}
-          </dl>
+        <CardContent className="space-y-3">
+          <div className="space-y-2">
+            <Label htmlFor="goal">Goal</Label>
+            <Textarea
+              id="goal"
+              value={goal}
+              onChange={(e) => setGoal(e.target.value)}
+              placeholder="e.g. Assess feasibility and GTM strategy for entering Germany B2B payroll market"
+              rows={5}
+            />
+          </div>
+          <Button onClick={() => void start()} disabled={starting}>
+            {starting ? "Starting…" : "Start"}
+          </Button>
         </CardContent>
       </Card>
     </main>

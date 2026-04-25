@@ -23,6 +23,10 @@ dependencies = [
     "python-multipart>=0.0.26",
     "docling>=2.91.0",
     "tiktoken>=0.12.0",
+    "langgraph>=1.1.9",
+    "langgraph-checkpoint-postgres>=3.0.5",
+    "deepagents>=0.5.3",
+    "readability-lxml>=0.8.4.1",
 ]
 
 [dependency-groups]
@@ -35,6 +39,7 @@ dev = [
     "mypy>=1.13",
     "pre-commit>=4.0",
     "numpy>=2.4.4",
+    "respx>=0.23.1",
 ]
 
 [build-system]

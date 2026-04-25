@@ -1,0 +1,22 @@
+{
+  "results": [
+    {
+      "title": "Global TAM Estimation Framework",
+      "url": "https://example.com/tam-framework",
+      "text": "Framework for estimating TAM/SAM/SOM by segment.",
+      "publishedDate": "2026-01-20T08:00:00Z"
+    },
+    {
+      "title": "Entering Regulated Industries",
+      "url": "https://example.com/regulated-entry",
+      "text": "Risk controls and compliance sequencing for go-to-market.",
+      "publishedDate": null
+    },
+    {
+      "title": "Partner-led Expansion Playbook",
+      "url": "https://example.com/partner-led-expansion",
+      "text": "Evaluating distribution partners in new geographies.",
+      "publishedDate": "2025-09-05T15:45:00Z"
+    }
+  ]
+}

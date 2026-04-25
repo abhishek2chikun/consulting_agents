@@ -86,3 +86,19 @@ export interface PingResponse {
   model: string;
   provider: string;
 }
+
+export interface SearchHealthResponse {
+  titles: string[];
+}
+
+export interface CreateRunResponse {
+  run_id: string;
+}
+
+export interface RunInfoResponse {
+  run_id: string;
+  task_type: string;
+  goal: string;
+  status: string;
+  artifact_paths: string[];
+}

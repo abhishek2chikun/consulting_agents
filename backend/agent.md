@@ -104,6 +104,10 @@ backend/
       test_chunker.py        # token-aware chunk() unit tests (M3.5)
       test_task_registry.py  # in-process asyncio.Task registry (M3.6)
       test_rag_search.py     # rag_search early-exit paths (M3.7, no DB / no network)
+      test_search_provider_base.py # SearchResult schema round-trip (M4.1)
+      test_tavily_provider.py # Tavily adapter normalization with respx (M4.2)
+      test_exa_provider.py    # Exa adapter normalization with respx (M4.3)
+      test_perplexity_provider.py # Perplexity adapter normalization with respx (M4.4)
     integration/
       __init__.py
       conftest.py            # autouse fixture draining `ingest:*` tasks after each test (M3.6)
@@ -117,6 +121,7 @@ backend/
       test_documents_api.py  # Documents REST API (M3.3) end-to-end
       test_ingest_pipeline.py # M3.6 end-to-end: upload → run_ingest → ready (skipped without OPENAI_API_KEY)
       test_rag_search.py     # M3.7 end-to-end: ingest → rag_search returns relevant chunk (skipped without OPENAI_API_KEY)
+      test_health_search.py  # /health/search diagnostics endpoint (M4.7)
     fixtures/
       README.md              # how to regenerate sample.pdf
       sample.pdf             # 2-page deterministic PDF for ingestion tests (M3.4)
@@ -126,13 +131,13 @@ backend/
 
 | Module | Status | Location | agent.md |
 |---|---|---|---|
-| `app` | Active scaffolding (M3.6) | `backend/app/` | `backend/app/agent.md` |
+| `app` | Active scaffolding (M4.7) | `backend/app/` | `backend/app/agent.md` |
 | `app.core` | Active (config + db + crypto + task_registry) | `backend/app/core/` | `backend/app/core/agent.md` |
 | `app.models` | Active (M3.2) | `backend/app/models/` | `backend/app/models/agent.md` |
 | `app.services` | Active (M3.3) | `backend/app/services/` | `backend/app/services/agent.md` |
 | `app.schemas` | Active (M3.3) | `backend/app/schemas/` | `backend/app/schemas/agent.md` |
-| `app.api` | Active (M3.6) | `backend/app/api/` | `backend/app/api/agent.md` |
-| `app.agents` | Active (M3.7) | `backend/app/agents/` | `backend/app/agents/agent.md` |
+| `app.api` | Active (M4.7) | `backend/app/api/` | `backend/app/api/agent.md` |
+| `app.agents` | Active (M4.4) | `backend/app/agents/` | `backend/app/agents/agent.md` |
 | `app.ingestion` | Active (M3.6) | `backend/app/ingestion/` | `backend/app/ingestion/agent.md` |
 | `alembic` | Active (revisions 0001, 0002, 0003, 0004, 0005) | `backend/alembic/` | `backend/alembic/agent.md` |
 
@@ -145,7 +150,7 @@ backend/
   from mypy strictness.
 - **Settings:** all runtime configuration flows through `app.core.config.Settings`
   (loaded from environment / `.env`).
-- **Commits:** Conventional Commits, one commit per plan task.
+- **Commits:** Conventional Commits, one commit per milestone (M1, M2, M3, ...).
 - **Imports:** canonical `app.<module>` style; no relative imports across packages.
 
 ## Quality gates
@@ -215,49 +220,36 @@ Tests are split into:
 - M3.5 — Token-aware chunker. New runtime dep `tiktoken` (ships `py.typed`, no mypy stub config needed). New module `app/ingestion/chunker.py` exposing `ChunkPayload(ord:int, text:str)` (frozen dataclass) and `chunk(markdown, target_tokens=800, overlap_tokens=100) -> list[ChunkPayload]`. Implementation: encode the stripped input with tiktoken's `cl100k_base` BPE (GPT-4 / Claude 3 family compatible — adequate for SIZING; not exact for billing), walk a sliding window of `target_tokens` with stride `target_tokens - overlap_tokens`, decode each window and `strip()` whitespace, suppress trailing empty windows, and densely renumber `ord`. Returns `[]` for empty/whitespace input; returns one chunk when the whole input fits in `target_tokens`. Validates `target_tokens > 0` and `0 <= overlap_tokens < target_tokens`. Pure CPU, fast — no async wrapping needed by the M3.6 worker. Known V1 limitation: window boundaries land between BPE tokens, not on sentence/markdown structure (M5+ may revisit). Seven fast unit tests in `tests/unit/test_chunker.py` cover: short-text single-chunk, long-text size bound (with ±5 token leeway for decode/strip drift), boundary overlap (asserts ≥40/80 token IDs match between consecutive chunks' tail/head), order preservation (`ord` is 0..N-1 and word0/word1999 land in first/last chunk respectively), empty + whitespace input, arg validation (zero/negative/equal-to-target overlap), and `ChunkPayload` dataclass identity. 59/59 tests pass; `ruff`, `ruff format`, `mypy app`, and `make check` all clean. Per V1 milestone-commit policy this work is **uncommitted** on `main` and will squash into the M3 commit after M3.7: **Done**.
 - M3.6 — Embedder + asyncio ingest worker + in-process task registry. New `app/core/task_registry.py` exposing `TaskRegistry` and a module-level `TASK_REGISTRY` (dict keyed by string ID; auto-prunes via done-callback that's anchored to the specific task object so overwrites are safe). New `app/ingestion/embedder.py` exposing `embed_texts(texts, *, session) -> list[list[float]]` over `langchain_openai.OpenAIEmbeddings` with hardcoded model `text-embedding-3-small` (1536-dim) and `EMBEDDING_BATCH_SIZE = 64`; resolves the API key via `SettingsService.get_provider_key("openai")` (NOT directly from `OPENAI_API_KEY`) so production behavior matches the user's Settings page; raises `ValueError` if no key configured and `RuntimeError` on dim mismatch with `Settings.embedding_dim`. New `app/ingestion/worker.py` exposing `async run_ingest(document_id)` — owns its own `AsyncSessionLocal()` sessions (do NOT pass one in; runs as a background task long after the originating request closed its session) and drives the document through `pending → parsing → embedding → ready` (or `→ failed`). State-machine deviation from the original spec: the `DocumentStatus` enum (M3.2) has no `chunking` and no `indexed` members, so chunking is collapsed into the `parsing` status and terminal-success is `ready`; chunks are persisted in a single transaction after embedding. Catches all exceptions, marks the row `failed` with a short `Document.error`, and returns normally (so the wrapping task completes cleanly without an "exception was never retrieved" warning); `asyncio.CancelledError` IS re-raised after marking the row failed. `POST /documents` now schedules `run_ingest(doc.id)` via `asyncio.create_task` and registers it under `f"ingest:{doc.id}"`; the 201 response shape is unchanged (status still `pending` at response time). New `tests/integration/conftest.py` autouse fixture drains any leaked `ingest:*` tasks at end of test (with a 2s grace then cancel) so existing M3.3 tests — which upload PDFs without an OpenAI key configured and would now leave a background ingest racing toward `failed` — don't bleed into the next test. New unit suite `tests/unit/test_task_registry.py` (6 tests: register-and-get, cancel-running, cancel-unknown, completed-auto-removed, overwrite-existing, singleton-exists). New integration test `tests/integration/test_ingest_pipeline.py` posts the M3.4 fixture PDF, polls every 500ms (cap 120s for first-run Docling weights), and asserts terminal `ready` with ≥1 chunk, embedding non-null, dim 1536, embedding_model `text-embedding-3-small`; gated behind both `pytest.mark.integration` and `pytest.mark.skipif(not OPENAI_API_KEY)`. Registered the `integration` marker in `pyproject.toml` (alongside the existing `slow` marker). 31/31 unit tests pass; 33 integration tests pass + the new ingest test SKIPS without a key. `ruff`, `ruff format`, `mypy app`, and `alembic check` all clean. **Live-OpenAI integration test was NOT executed** in this session because no `OPENAI_API_KEY` was available in the dev env; manual repro: `cd backend && OPENAI_API_KEY=sk-... uv run pytest tests/integration/test_ingest_pipeline.py -v -s`. Per V1 milestone-commit policy this work is **uncommitted** on `main` and will squash into the M3 commit after M3.7: **Done**.
 
-## M2 milestone
+## Milestone status
 
-All M2 sub-tasks (M2.1 through M2.6) are complete and locally green
-but **uncommitted on `main`**. Pending: squash all M2 work into a
-single conventional-commits commit (per the milestone-commit policy
-documented in the V1 plan).
+- **M1:** Completed and committed.
+- **M2:** Completed and committed (`a54515e` + frontend M2.7 at `a98957c`).
+- **M3:** Completed and committed as milestone squash (`7f4b8ca`).
+- **M4 (partial):** M4.1-M4.4 provider abstraction + adapters completed;
+  M4.7 diagnostics endpoint + settings UI test button completed;
+  M4.5/M4.6 deferred until run-scoped Evidence/Run tables are in place (M5).
 
-## M3.7 — `rag_search` LangChain tool
+## Current progress (latest)
 
-New `app/agents/tools/` subpackage hosting `@tool`-decorated callables
-bound by future agent stages. V1 ships one tool: `rag_search`. The
-async `_rag_search_impl(query, k)` (and its `@tool`-decorated wrapper
-`rag_search`) embeds the query via `app.ingestion.embedder.embed_texts`
-(same path the M3.6 worker uses, so vectors stay in the same space)
-then runs `select(... Chunk.embedding.cosine_distance(q_vec).label(
-"distance")).order_by(distance).limit(k)` over the `chunks` table —
-backed by the M3.2 HNSW index `ix_chunks_embedding_hnsw`
-(`vector_cosine_ops`). Returns `list[RagHit]` (TypedDict) with `text`,
-`document_id` (str), `chunk_id` (str), `ord` (int), and `score`
-(float = `1 - cosine_distance`, higher = more similar; OpenAI's
-L2-normalized vectors land in [-1, 1]). Short-circuits without
-touching DB or network for an empty/whitespace query or `k <= 0`.
-Implementation choices verified before coding: (a) `langchain_core.tools.tool`
-accepts coroutine functions and yields a `StructuredTool` whose
-`ainvoke` is a coroutine — confirmed by introspection; (b) `pgvector.sqlalchemy.Vector`
-exposes `cosine_distance` / `l2_distance` / `max_inner_product` on its
-comparator factory — confirmed by `dir(Vector(3).comparator_factory)` —
-so we use the ORM comparator instead of raw SQL with a string-cast
-vector. Two unit tests in `tests/unit/test_rag_search.py` pin the
-empty-query and `k <= 0` early-exit paths (no DB / no network — always
-run inside `make check`). One integration test in
-`tests/integration/test_rag_search.py` does the full M3.6 + M3.7 loop
-(seed OpenAI key → upload `sample.pdf` → poll until `ready` →
-`rag_search("quick brown fox")` → assert top hit's `document_id`
-matches the freshly-ingested doc and `score > 0.2`). Skipped without
-`OPENAI_API_KEY`. Verification: `uv run pytest -v` → **67 passed,
-2 skipped** (the two skipped are `test_ingest_pipeline` from M3.6 and
-the new `test_rag_search` integration test); `ruff check`, `ruff format
---check`, `mypy app`, `alembic check`, and `make check` all clean. Per
-V1 milestone-commit policy this work is **uncommitted** on `main` and
-will squash into the M3 commit alongside M3.4–M3.6: **Done**.
+- Added `app.agents.tools.providers` with:
+  - `base.py` (`SearchResult`, `SearchProvider` protocol)
+  - `tavily.py`, `exa.py`, `perplexity.py` adapters
+- Added `GET /health/search?q=...` in `app/api/health.py`:
+  resolves active search provider from settings, validates provider key,
+  dispatches one provider call, returns `{ "titles": [..top3..] }`.
+- Frontend settings page now has **Test search** button wired to
+  `frontend/lib/api.ts::testSearchProvider` and shows returned titles via toast.
+- Added tests and fixtures:
+  - `tests/unit/test_search_provider_base.py`
+  - `tests/unit/test_tavily_provider.py`
+  - `tests/unit/test_exa_provider.py`
+  - `tests/unit/test_perplexity_provider.py`
+  - `tests/integration/test_health_search.py`
+  - `tests/fixtures/{tavily_response,exa_response,perplexity_response}.json`
 
 ## Deferred work
 
-Everything else in the V1 plan (M1.2 onward): database/Alembic, auth, agent runtime,
-websockets, retrieval, exports, frontend integration. See `docs/` for the full plan.
+- **M4.5 / M4.6 tool-level evidence registration** depends on run-scoped
+  persistence (`Run` + `Evidence`) that lands with M5 DB/schema work.
+  We intentionally deferred this wiring to avoid a temporary nullable/placeholder
+  `run_id` design that would require extra cleanup migrations.

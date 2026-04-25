@@ -23,6 +23,7 @@ avoid polluting the singleton.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine
 from typing import Final
 
 
@@ -50,6 +51,12 @@ class TaskRegistry:
                 self._tasks.pop(k, None)
 
         task.add_done_callback(_cleanup)
+
+    def spawn(self, key: str, coro: Coroutine[object, object, None]) -> asyncio.Task[None]:
+        """Create + register a task from coroutine `coro` under `key`."""
+        task = asyncio.create_task(coro)
+        self.register(key, task)
+        return task
 
     def get(self, key: str) -> asyncio.Task[None] | None:
         """Return the task registered under `key`, or `None`."""

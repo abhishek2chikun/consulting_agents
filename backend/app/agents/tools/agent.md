@@ -1,10 +1,10 @@
 # app.agents.tools — agent.md
 
 ## Status
-**Active (M3.7).** LangChain tools exposed to the agent stages. V1
-ships a single tool, `rag_search`, the vector-similarity primitive used
-by retrieval / drafting / critique nodes to ground their output in the
-ingested document corpus.
+**Active (M4.4).** LangChain tools + provider adapters exposed to the
+agent stages. V1 currently ships one retrieval tool (`rag_search`) and
+three web-search provider adapters (Tavily, Exa, Perplexity) used by
+diagnostic and upcoming `web_search` tool flows.
 
 ---
 
@@ -26,8 +26,14 @@ citation.
 ## Directory Structure
 ```text
 app/agents/tools/
-  __init__.py            # package marker (empty)
+  __init__.py            # exports rag_search
   rag_search.py          # @tool rag_search + _rag_search_impl + RagHit
+  providers/
+    __init__.py
+    base.py              # SearchResult schema + SearchProvider protocol
+    tavily.py            # Tavily /search adapter
+    exa.py               # Exa /search adapter
+    perplexity.py        # Perplexity chat/completions adapter
 ```
 
 ### Corresponding Tests
@@ -35,14 +41,23 @@ app/agents/tools/
 backend/tests/unit/test_rag_search.py
   test_rag_search_empty_query_returns_empty
   test_rag_search_zero_k_returns_empty
+backend/tests/unit/test_search_provider_base.py
+  test_search_result_round_trip_serialization
+backend/tests/unit/test_tavily_provider.py
+  test_tavily_provider_normalizes_results
+backend/tests/unit/test_exa_provider.py
+  test_exa_provider_normalizes_results
+backend/tests/unit/test_perplexity_provider.py
+  test_perplexity_provider_maps_citations_to_results
 backend/tests/integration/test_rag_search.py
   test_rag_search_returns_relevant_chunk_after_ingest   # @pytest.mark.integration; skipped without OPENAI_API_KEY
 ```
 
-The unit tests pin the early-exit paths (no DB / no network) and run
-inside `make check`. The integration test does the full M3.6 + M3.7
-loop: upload PDF → wait for `ready` → `rag_search("quick brown fox")` →
-assert top hit comes from the freshly-ingested document.
+Unit tests pin early-exit behavior for `rag_search` and HTTP-response
+normalization for each provider adapter. Integration tests cover the
+full M3.6 + M3.7 loop (upload → ingest → `rag_search`). Search-adapter
+live behavior is currently exercised indirectly via
+`/health/search` integration tests with `respx` mocking.
 
 ---
 
@@ -55,6 +70,10 @@ from app.agents.tools.rag_search import (
     RagHit,              # TypedDict {text, document_id, chunk_id, ord, score}
     DEFAULT_K,           # int = 8
 )
+from app.agents.tools.providers import SearchProvider, SearchResult
+from app.agents.tools.providers.tavily import TavilyProvider
+from app.agents.tools.providers.exa import ExaProvider
+from app.agents.tools.providers.perplexity import PerplexityProvider
 ```
 
 ### Result shape (`RagHit`)
@@ -90,6 +109,7 @@ pgvector `<=>` operator. The HNSW index `ix_chunks_embedding_hnsw`
 |---|---|
 | `langchain_core.tools` | `@tool` decorator |
 | `sqlalchemy` | `select` + ORM query construction |
+| `httpx` | async HTTP clients for provider adapters |
 | `pgvector.sqlalchemy` | (transitively, via `Chunk.embedding`) cosine-distance comparator |
 | `app.core.db` | `AsyncSessionLocal` |
 | `app.ingestion.embedder` | `embed_texts` |
@@ -98,7 +118,9 @@ pgvector `<=>` operator. The HNSW index `ix_chunks_embedding_hnsw`
 | Consumed by | What |
 |---|---|
 | `tests.unit.test_rag_search` | early-exit paths |
+| `tests.unit.test_*_provider` | adapter normalization behavior |
 | `tests.integration.test_rag_search` | full ingest+search loop |
+| `app.api.health` | `/health/search` diagnostics endpoint |
 | Future: agent runtime (M5+) | binds `rag_search` to retrieval / drafting / critique nodes |
 
 ---
@@ -122,14 +144,18 @@ corpora grow large enough to make the planner skip the index.
   avoids manual `CAST(:q AS vector)` boilerplate. Score sign convention
   documented (`1 - distance`, higher better). Two unit tests + one
   integration test (skipped in CI without OPENAI_API_KEY).
+- M4.1-M4.4 — Added provider-abstraction layer under `tools/providers`:
+  `SearchResult` schema + `SearchProvider` protocol and adapters for
+  Tavily, Exa, and Perplexity. Each adapter has a mocked unit test
+  (`respx`) and fixture payload under `tests/fixtures/`.
 
 ## Next Steps
 
 1. **M5+** — bind `rag_search` to LangGraph retrieval / drafting /
    critique nodes; the binding lives in the per-stage agent modules,
    not here.
-2. **V1.1** — second tool: `web_search` (Tavily/Exa/Perplexity),
-   delivering parity with `rag_search` for non-corpus sources.
+2. **M4.5** — implement `web_search` tool factory that consumes these
+   adapters and emits evidence-registered `src_id` hits.
 3. **V1.1** — consider returning `document_filename` alongside
    `document_id` so citations don't require a second DB hop. Held off
    in V1 because the agent runtime hasn't been written yet and the
