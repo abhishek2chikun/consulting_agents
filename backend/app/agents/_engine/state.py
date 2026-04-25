@@ -1,4 +1,4 @@
-"""Typed state contract for the market-entry LangGraph workflow (M5.4)."""
+"""Typed state contract for consulting-pipeline LangGraph workflows (M5.4, generalized in M9.1)."""
 
 from __future__ import annotations
 

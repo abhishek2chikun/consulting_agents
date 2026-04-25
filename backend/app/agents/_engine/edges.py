@@ -1,4 +1,4 @@
-"""Conditional-edge helpers for the market-entry graph (M6.10).
+"""Conditional-edge helpers for consulting-pipeline graphs (M6.10, generalized in M9.1).
 
 LangGraph routes by string return values. ``route_after_reviewer``
 inspects the gate verdict for ``stage_slug`` plus the run-wide
