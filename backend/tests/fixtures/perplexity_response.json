@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-test",
+  "object": "chat.completion",
+  "created": 1760000000,
+  "model": "pplx-online",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Here are relevant sources.",
+        "citations": [
+          "https://example.com/market-overview",
+          "https://example.com/entry-strategy",
+          "https://example.com/regulatory-notes"
+        ]
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}

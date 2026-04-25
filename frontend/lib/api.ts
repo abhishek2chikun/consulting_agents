@@ -25,10 +25,13 @@
  */
 
 import type {
+  CreateRunResponse,
   ModelOverridesMap,
   PingResponse,
   ProviderName,
   ProvidersResponse,
+  RunInfoResponse,
+  SearchHealthResponse,
   SearchProviderName,
   SettingsSnapshot,
 } from "./types";
@@ -142,4 +145,34 @@ export const pingLLM = (role: string, prompt = "ping"): Promise<PingResponse> =>
   request<PingResponse>("/ping", {
     method: "POST",
     body: JSON.stringify({ prompt, role }),
+  });
+
+export const testSearchProvider = (query = "test"): Promise<SearchHealthResponse> =>
+  request<SearchHealthResponse>(`/health/search?q=${encodeURIComponent(query)}`);
+
+export const createRun = (body: {
+  task_type: string;
+  goal: string;
+  document_ids: string[];
+}): Promise<CreateRunResponse> =>
+  request<CreateRunResponse>("/runs", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const getRun = (runId: string): Promise<RunInfoResponse> =>
+  request<RunInfoResponse>(`/runs/${runId}`);
+
+export const submitRunAnswers = (
+  runId: string,
+  answers: Record<string, string>,
+): Promise<void> =>
+  request<void>(`/runs/${runId}/answers`, {
+    method: "POST",
+    body: JSON.stringify({ answers }),
+  });
+
+export const cancelRun = (runId: string): Promise<void> =>
+  request<void>(`/runs/${runId}/cancel`, {
+    method: "POST",
   });

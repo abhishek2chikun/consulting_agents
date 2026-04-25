@@ -1,0 +1,23 @@
+{
+  "query": "market entry strategy",
+  "results": [
+    {
+      "title": "Market Entry Strategy Guide",
+      "url": "https://example.com/market-entry-guide",
+      "content": "A practical guide to evaluating TAM, channels, and risks.",
+      "published_date": "2026-02-01T00:00:00Z"
+    },
+    {
+      "title": "Channel Selection for New Markets",
+      "url": "https://example.com/channel-selection",
+      "content": "How to compare direct, partner, and hybrid channel models.",
+      "published_date": null
+    },
+    {
+      "title": "Regulatory Readiness Checklist",
+      "url": "https://example.com/regulatory-readiness",
+      "content": "Checklist for compliance planning before launch.",
+      "published_date": "2025-11-15T12:30:00Z"
+    }
+  ]
+}

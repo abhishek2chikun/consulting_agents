@@ -2,7 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.documents import router as documents_router
+from app.api.health import router as health_router
 from app.api.ping import router as ping_router
+from app.api.runs import router as runs_router
 from app.api.settings import router as settings_router
 from app.api.tasks import router as tasks_router
 from app.core.config import get_settings
@@ -36,10 +38,12 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok", "env": settings.app_env}
 
+    app.include_router(health_router)
     app.include_router(settings_router)
     app.include_router(ping_router)
     app.include_router(tasks_router)
     app.include_router(documents_router)
+    app.include_router(runs_router)
 
     return app
 

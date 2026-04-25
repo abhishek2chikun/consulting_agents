@@ -29,14 +29,19 @@ Notes
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Callable
 from typing import Any, TypedDict
 
 from langchain_core.tools import tool
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.tools.cite import register_evidence
 from app.core.db import AsyncSessionLocal
 from app.ingestion.embedder import embed_texts
 from app.models.chunk import Chunk
+from app.models.evidence import EvidenceKind
 
 # Default top-k. Picked to match the V1 retrieval budget (small enough to
 # keep prompt tokens bounded, large enough to surface multiple sources).
@@ -53,6 +58,12 @@ class RagHit(TypedDict):
     ord: int  # chunk's ordinal position within its document.
 
 
+class RagToolHit(TypedDict):
+    src_id: str
+    title: str
+    snippet: str
+
+
 async def _rag_search_impl(query: str, k: int = DEFAULT_K) -> list[RagHit]:
     """Async core of the rag_search tool.
 
@@ -67,29 +78,10 @@ async def _rag_search_impl(query: str, k: int = DEFAULT_K) -> list[RagHit]:
         return []
 
     async with AsyncSessionLocal() as session:
-        # Embed the query (uses the OpenAI key from SettingsService —
-        # same path the M3.6 worker uses for document embeddings, so the
-        # vectors are in the same space).
         embeddings = await embed_texts([query], session=session)
         if not embeddings:
             return []
-        q_vec = embeddings[0]
-
-        # pgvector cosine distance via the SQLAlchemy comparator.
-        # Score = 1 - distance, so higher is better.
-        distance = Chunk.embedding.cosine_distance(q_vec).label("distance")
-        stmt = (
-            select(
-                Chunk.id,
-                Chunk.document_id,
-                Chunk.text,
-                Chunk.ord,
-                distance,
-            )
-            .order_by(distance)
-            .limit(k)
-        )
-        rows = (await session.execute(stmt)).all()
+        rows = await _search_rows_for_embedding(session, embeddings[0], k)
 
     return [
         RagHit(
@@ -121,4 +113,76 @@ async def rag_search(query: str, k: int = DEFAULT_K) -> list[dict[str, Any]]:
     return [dict(h) for h in hits]
 
 
-__all__ = ["DEFAULT_K", "RagHit", "_rag_search_impl", "rag_search"]
+def build_rag_search(
+    run_id: uuid.UUID,
+    session_factory: Callable[[], AsyncSession],
+) -> Any:
+    """Build run-scoped RAG tool that writes Evidence rows."""
+
+    @tool
+    async def rag_search_for_run(query: str, k: int = DEFAULT_K) -> list[dict[str, Any]]:
+        """Search local document chunks and register hits as Evidence rows."""
+        if not query or not query.strip() or k <= 0:
+            return []
+
+        async with session_factory() as session:
+            embeddings = await embed_texts([query], session=session)
+            if not embeddings:
+                return []
+            rows = await _search_rows_for_embedding(session, embeddings[0], k)
+
+            out: list[RagToolHit] = []
+            for row in rows:
+                title = f"Document {row.document_id} chunk {row.ord}"
+                snippet = str(row.text)
+                src_id = await register_evidence(
+                    session,
+                    run_id,
+                    kind=EvidenceKind.doc,
+                    url=None,
+                    chunk_id=row.id,
+                    title=title,
+                    snippet=snippet,
+                    provider="rag",
+                )
+                out.append(
+                    RagToolHit(
+                        src_id=src_id,
+                        title=title,
+                        snippet=snippet,
+                    )
+                )
+
+            return [dict(hit) for hit in out]
+
+    return rag_search_for_run
+
+
+async def _search_rows_for_embedding(
+    session: AsyncSession,
+    query_embedding: list[float],
+    k: int,
+) -> list[Any]:
+    distance = Chunk.embedding.cosine_distance(query_embedding).label("distance")
+    stmt = (
+        select(
+            Chunk.id,
+            Chunk.document_id,
+            Chunk.text,
+            Chunk.ord,
+            distance,
+        )
+        .order_by(distance)
+        .limit(k)
+    )
+    return list((await session.execute(stmt)).all())
+
+
+__all__ = [
+    "DEFAULT_K",
+    "RagHit",
+    "RagToolHit",
+    "_rag_search_impl",
+    "build_rag_search",
+    "rag_search",
+]

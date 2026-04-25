@@ -7,8 +7,9 @@ agent node, the `provider_name_for(model)` helper that maps a
 constructed LangChain client back to its registry key (consumed by
 `app.api.ping` in M2.6), and (M3.7) the `tools/` subpackage of
 `@tool`-decorated callables that agent nodes will bind to LLMs. V1
-ships a single tool: `rag_search` (vector similarity over ingested
-chunks). Future home of the LangGraph-based agent runtime (framing,
+ships `rag_search` plus M4 provider adapters (Tavily/Exa/Perplexity)
+for upcoming `web_search` wiring. Future home of the LangGraph-based
+agent runtime (framing,
 planning, retrieval, drafting, critique, packaging) and the
 DeepAgents wiring.
 
@@ -40,6 +41,11 @@ app/agents/
   tools/               # M3.7 — @tool-decorated callables (RAG, web search, ...)
     __init__.py
     rag_search.py      # @tool rag_search — pgvector cosine over chunks
+    providers/         # M4.1-M4.4 — SearchProvider protocol + adapters
+      base.py
+      tavily.py
+      exa.py
+      perplexity.py
     agent.md
 ```
 
@@ -152,6 +158,11 @@ about caching.
   `text / document_id / chunk_id / ord / score` (score = 1 - distance,
   higher better). Two unit tests (early-exit paths) + one live
   integration test (skipped without `OPENAI_API_KEY`).
+- M4.1-M4.4 — Added `app/agents/tools/providers/` with a provider-
+  agnostic `SearchResult` schema + `SearchProvider` protocol and
+  adapters for Tavily, Exa, and Perplexity. These adapters are already
+  used by `/health/search` diagnostics and will be wired into the
+  `web_search` tool factory when Evidence/Run tables land in M5.
 
 ## Next Steps
 

@@ -1,12 +1,10 @@
 # app.api — agent.md
 
 ## Status
-**Active (M3.3).** Four routers landed: `settings.py` (mounted at
-`/settings`), `ping.py` (mounted at `/ping`), `tasks.py` (mounted at
-`/tasks`), and `documents.py` (mounted at `/documents`). Future
-milestones add `runs.py`, `websocket.py`, etc. — each module exposes a
-single `router = APIRouter(...)` that `app.main.create_app` mounts via
-`include_router`.
+**Active (M4.7).** Five routers are mounted: `settings.py`
+(`/settings`), `health.py` (`/health/search`), `ping.py` (`/ping`),
+`tasks.py` (`/tasks`), and `documents.py` (`/documents`). Future
+milestones add `runs.py` + SSE streaming endpoints.
 
 ---
 
@@ -37,6 +35,7 @@ Conventions:
 ```text
 app/api/
   __init__.py        # package marker (no re-exports yet)
+  health.py          # Search diagnostics router — GET /health/search (M4.7)
   settings.py        # Settings router — /settings + subpaths (M2.4)
   ping.py            # Ping router — POST /ping (M2.6)
   tasks.py           # Tasks catalog router — GET /tasks (M3.1)
@@ -76,6 +75,10 @@ backend/tests/integration/test_documents_api.py
   test_delete_document_removes_row_and_file
   test_delete_nonexistent_returns_404
   test_upload_empty_file_returns_400
+
+backend/tests/integration/test_health_search.py
+  test_health_search_returns_top_titles
+  test_health_search_400_when_provider_key_missing
 ```
 
 ---
@@ -84,11 +87,13 @@ backend/tests/integration/test_documents_api.py
 
 ```python
 from app.api.settings import router as settings_router
+from app.api.health import router as health_router
 from app.api.ping import router as ping_router
 from app.api.tasks import router as tasks_router
 from app.api.documents import router as documents_router
 
 # Routes (mounted by app.main.create_app):
+#   GET    /health/search?q=...         -> {"titles": [str, str, str]}
 #   GET    /settings/providers          -> ProvidersResponse
 #   PUT    /settings/providers/{provider}    body: SetProviderKeyRequest    -> 204
 #   PUT    /settings/model_overrides         body: ModelOverridesRequest    -> 204
@@ -119,6 +124,13 @@ directly. The endpoint is read-only; rows are seeded by migration
 matches the M3.1 spec test exactly; deviating to a `{tasks: [...]}`
 envelope would have introduced a needless contract delta.
 
+`/health/search` is a lightweight diagnostics endpoint used by the
+Settings page "Test search" button. It reads the active
+`search_provider` from `settings_kv` (defaults to `tavily`), retrieves
+the provider key via `SettingsService`, executes one live provider call,
+and returns the top 3 titles only. Missing key and unsupported provider
+map to `400` with actionable detail.
+
 ---
 
 ## Dependencies
@@ -128,6 +140,7 @@ envelope would have introduced a needless contract delta.
 | `fastapi` | `APIRouter`, `Depends`, `status` |
 | `sqlalchemy.ext.asyncio` | `AsyncSession` (for the `SessionDep` alias) |
 | `app.core.db` | `get_session` (DI) |
+| `app.agents.tools.providers.*` | Tavily / Exa / Perplexity adapters (`/health/search`) |
 | `app.schemas.settings` | request / response DTOs |
 | `app.schemas.ping` | `PingRequest`, `PingResponse` |
 | `app.schemas.tasks` | `TaskTypeInfo` |
@@ -197,15 +210,19 @@ through `app.core.db` and `app.services.settings_service`.
   drains any leaked `ingest:*` tasks at end of test so background
   failures (no OpenAI key configured in those tests) don't bleed
   into the next case.
+- M4.7 — `health.py` router mounted at `/health/search`. Endpoint takes
+  query `q`, resolves active search provider + key from settings,
+  dispatches to Tavily/Exa/Perplexity adapter, and returns top-3 titles.
+  Integration test coverage in `test_health_search.py` uses `respx` to
+  mock provider HTTP and verifies both happy-path + missing-key 400.
 
 ## Next Steps
 
-1. M3 — `runs.py` for run creation / status / cancel.
-2. M4 — websocket router for live stage updates.
-3. Add a `DELETE /documents/{id}/cancel` (or repurpose existing
+1. M5 — `runs.py` for run creation / status / cancel + SSE stream routes.
+2. Add a `DELETE /documents/{id}/cancel` (or repurpose existing
    DELETE) once ingestion is async — the V1 plan currently treats
    delete-during-ingest as out of scope.
-4. Add a module-level `api_router = APIRouter()` aggregator if the set
+3. Add a module-level `api_router = APIRouter()` aggregator if the set
    of subroutes grows beyond easy hand-mounting in `app.main`.
 
 ## Known Issues / Blockers

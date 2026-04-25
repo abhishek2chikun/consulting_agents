@@ -35,6 +35,7 @@ import {
   setModelOverride,
   setProviderKey,
   setSearchProvider,
+  testSearchProvider,
 } from "@/lib/api";
 import {
   AGENT_ROLES,
@@ -424,6 +425,7 @@ function SearchProviderSection({ snapshot, onRefresh }: SectionProps) {
     snapshot.search_provider ?? "tavily",
   );
   const [savingActive, setSavingActive] = useState(false);
+  const [testingSearch, setTestingSearch] = useState(false);
 
   // Sync to snapshot updates (e.g. after key save triggers a refresh).
   // Previous-prop comparison instead of an effect — see RoleOverrideRow.
@@ -455,6 +457,22 @@ function SearchProviderSection({ snapshot, onRefresh }: SectionProps) {
       }
     } finally {
       setSavingActive(false);
+    }
+  };
+
+  const testSearch = async () => {
+    setTestingSearch(true);
+    try {
+      const result = await testSearchProvider("test");
+      if (result.titles.length === 0) {
+        toast.success("Search test succeeded (no titles returned)");
+      } else {
+        toast.success(result.titles.join(" | "));
+      }
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setTestingSearch(false);
     }
   };
 
@@ -493,6 +511,15 @@ function SearchProviderSection({ snapshot, onRefresh }: SectionProps) {
             ) : null}
           </div>
         ))}
+        <div className="flex justify-end">
+          <Button
+            variant="outline"
+            onClick={() => void testSearch()}
+            disabled={testingSearch}
+          >
+            {testingSearch ? "Testing…" : "Test search"}
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

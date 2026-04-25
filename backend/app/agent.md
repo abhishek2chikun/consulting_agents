@@ -1,13 +1,11 @@
 # app — agent.md
 
 ## Status
-**Active scaffolding (M2.5).**
-FastAPI application factory is in place with `/health` plus the M2.4
-Settings router mounted at `/settings`. M2.5 added `agents/` (LLM
-provider registry + `get_chat_model`). Submodules: `core/` (config,
-db, crypto), `models/` (ORM), `services/` (domain logic),
-`schemas/` (Pydantic DTOs), `api/` (HTTP routers), `agents/` (LLM
-client factory; future LangGraph nodes).
+**Active (M4.7 in progress).**
+Application factory now mounts health/settings/ping/tasks/documents
+routers plus search-health diagnostics (`GET /health/search`).
+Submodules include ingestion (`docling -> chunk -> embed`) and
+agent tools (`rag_search` + search-provider adapters).
 
 ---
 
@@ -39,16 +37,33 @@ app/
     settings.py
   api/           # FastAPI routers (see app/api/agent.md)
     settings.py
+    health.py
+    ping.py
+    tasks.py
+    documents.py
   agents/        # LLM provider registry + chat model factory (see app/agents/agent.md)
     llm.py
+    tools/
+      __init__.py
+      rag_search.py
+      providers/
+        base.py
+        tavily.py
+        exa.py
+        perplexity.py
   ingestion/     # PDF parsing + chunking + embedding pipeline (see app/ingestion/agent.md)
+    __init__.py
     docling_parser.py
+    chunker.py
+    embedder.py
+    worker.py
 ```
 
 ### Corresponding Tests
 ```text
 backend/tests/test_health.py
 backend/tests/integration/test_settings_api.py    # exercises the mounted /settings router
+backend/tests/integration/test_health_search.py    # exercises /health/search diagnostics
 ```
 
 ---
@@ -60,7 +75,11 @@ from app.main import create_app, app  # FastAPI factory + module-level instance
 
 `create_app()` mounts:
 - `GET /health`
+- `GET /health/search`
 - `app.api.settings.router` (prefix `/settings`)
+- `app.api.ping.router` (prefix `/ping`)
+- `app.api.tasks.router` (prefix `/tasks`)
+- `app.api.documents.router` (prefix `/documents`)
 
 ---
 
@@ -69,12 +88,17 @@ from app.main import create_app, app  # FastAPI factory + module-level instance
 |---|---|
 | `fastapi` | `FastAPI` app class |
 | `app.core.config` | `get_settings()` |
+| `app.api.health` | `router` (mounted at `/health/search`) |
 | `app.api.settings` | `router` (mounted at `/settings`) |
+| `app.api.ping` | `router` (mounted at `/ping`) |
+| `app.api.tasks` | `router` (mounted at `/tasks`) |
+| `app.api.documents` | `router` (mounted at `/documents`) |
 
 | Consumed by | What |
 |---|---|
 | `tests.test_health` | exercises `/health` via `create_app()` |
 | `tests.integration.test_settings_api` | exercises `/settings/*` via `create_app()` |
+| `tests.integration.test_health_search` | exercises `/health/search` via `create_app()` |
 | `uvicorn` | serves `app.main:app` |
 
 ---
@@ -87,14 +111,14 @@ Reads settings via `app.core.config.get_settings()`. No module-local config.
 
 ## Current Progress
 
-- `create_app()` factory implemented.
+- `create_app()` factory implemented and mounting all current routers.
 - `/health` returns `{"status": "ok", "env": settings.app_env}`.
-- Settings router mounted at `/settings` (M2.4).
-- Module-level `app = create_app()` exposed for ASGI servers.
+- `/health/search` probes configured search provider and returns top-3 titles.
+- Ingestion stack (M3.4-M3.6) and RAG tooling (M3.7) are now present.
+- Search-provider adapters (M4.1-M4.4) and frontend test-search wiring (M4.7) landed.
 
 ## Next Steps
-1. Add additional routers under `api/` per milestone (`runs.py`,
-   `documents.py`, `websocket.py`).
+1. Add run lifecycle routers under `api/` (`runs.py`, SSE stream endpoints).
 2. Add lifespan handler in `create_app()` for startup/shutdown (DB
    pool, agent runtime warmup).
 3. When the lifespan handler lands, move the module-level
