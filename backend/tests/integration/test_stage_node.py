@@ -82,15 +82,15 @@ async def test_stage_node_persists_artifacts_and_evidence(
 
     async with AsyncSessionLocal() as session:
         artifact_rows = (
-            await session.execute(
-                select(Artifact).where(Artifact.run_id == run_id)
-            )
-        ).scalars().all()
+            (await session.execute(select(Artifact).where(Artifact.run_id == run_id)))
+            .scalars()
+            .all()
+        )
         evidence_rows = (
-            await session.execute(
-                select(Evidence).where(Evidence.run_id == run_id)
-            )
-        ).scalars().all()
+            (await session.execute(select(Evidence).where(Evidence.run_id == run_id)))
+            .scalars()
+            .all()
+        )
     assert len(artifact_rows) == 1
     assert artifact_rows[0].path == f"{stage_slug}/findings.md"
     assert len(evidence_rows) == 1
@@ -102,12 +102,8 @@ async def test_stage_node_reiterate_scope_passes_target_agents_to_prompt(
     run_id: uuid.UUID,
 ) -> None:
     payload = {
-        "artifacts": [
-            {"path": "stage2_competitive/pricing.md", "content": "Pricing [^p1]."}
-        ],
-        "evidence": [
-            {"src_id": "p1", "title": "Pricing src", "snippet": "x"}
-        ],
+        "artifacts": [{"path": "stage2_competitive/pricing.md", "content": "Pricing [^p1]."}],
+        "evidence": [{"src_id": "p1", "title": "Pricing src", "snippet": "x"}],
     }
     fake = FakeChatModel(structured_responses=[payload])
     node = make_stage_node("stage2_competitive", model=fake)

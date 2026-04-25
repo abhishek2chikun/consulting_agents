@@ -36,11 +36,7 @@ def build_framing_node(
     async def framing_node(state: RunState) -> RunState:
         goal = state.get("goal", "")
         document_ids = state.get("document_ids", []) or []
-        user_msg = (
-            f"goal: {goal}\n"
-            f"document_ids: {document_ids}\n\n"
-            "Produce the JSON object now."
-        )
+        user_msg = f"goal: {goal}\ndocument_ids: {document_ids}\n\nProduce the JSON object now."
 
         structured = model.with_structured_output(FramingResponse)  # type: ignore[attr-defined]
         result = await structured.ainvoke(

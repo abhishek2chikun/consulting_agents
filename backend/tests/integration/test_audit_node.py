@@ -54,9 +54,7 @@ async def test_audit_writes_audit_artifact_and_completes_run(
     async with AsyncSessionLocal() as session:
         row = (
             await session.execute(
-                select(Artifact).where(
-                    Artifact.run_id == run_id, Artifact.path == AUDIT_PATH
-                )
+                select(Artifact).where(Artifact.run_id == run_id, Artifact.path == AUDIT_PATH)
             )
         ).scalar_one()
         run = await session.get(Run, run_id)

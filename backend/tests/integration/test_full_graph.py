@@ -122,9 +122,7 @@ async def test_full_graph_runs_end_to_end_with_one_stage2_reiterate(
     )
     synthesis_model = FakeChatModel(responses=[report_body])
     audit_model = FakeChatModel(
-        responses=[
-            "## Weak Claims\n- none\n## Contradictions\n- none\n## Residual Gaps\n- none\n"
-        ]
+        responses=["## Weak Claims\n- none\n## Contradictions\n- none\n## Residual Gaps\n- none\n"]
     )
 
     models_by_role: dict[str, FakeChatModel] = {
@@ -162,25 +160,17 @@ async def test_full_graph_runs_end_to_end_with_one_stage2_reiterate(
     async with AsyncSessionLocal() as session:
         artifact_paths = sorted(
             r.path
-            for r in (
-                await session.execute(
-                    select(Artifact).where(Artifact.run_id == fresh_run)
-                )
-            ).scalars().all()
+            for r in (await session.execute(select(Artifact).where(Artifact.run_id == fresh_run)))
+            .scalars()
+            .all()
         )
         gate_count = len(
-            (
-                await session.execute(
-                    select(Gate).where(Gate.run_id == fresh_run)
-                )
-            ).scalars().all()
+            (await session.execute(select(Gate).where(Gate.run_id == fresh_run))).scalars().all()
         )
         evidence_count = len(
-            (
-                await session.execute(
-                    select(Evidence).where(Evidence.run_id == fresh_run)
-                )
-            ).scalars().all()
+            (await session.execute(select(Evidence).where(Evidence.run_id == fresh_run)))
+            .scalars()
+            .all()
         )
         run = await session.get(Run, fresh_run)
 
@@ -205,8 +195,8 @@ async def test_full_graph_runs_end_to_end_with_one_stage2_reiterate(
     # Verify EvidenceKind enum coercion succeeded for at least one row
     async with AsyncSessionLocal() as session:
         rows = (
-            await session.execute(
-                select(Evidence).where(Evidence.run_id == fresh_run)
-            )
-        ).scalars().all()
+            (await session.execute(select(Evidence).where(Evidence.run_id == fresh_run)))
+            .scalars()
+            .all()
+        )
     assert all(r.kind == EvidenceKind.web for r in rows)

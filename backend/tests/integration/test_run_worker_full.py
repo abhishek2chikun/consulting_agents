@@ -121,9 +121,7 @@ def _build_factories(
         "stage3_risk": [_stage_payload("stage3_risk", "s3")],
     }
     research_queue = (
-        stages["stage1_foundation"]
-        + stages["stage2_competitive"]
-        + stages["stage3_risk"]
+        stages["stage1_foundation"] + stages["stage2_competitive"] + stages["stage3_risk"]
     )
 
     gates = gate_verdicts or {
@@ -131,11 +129,7 @@ def _build_factories(
         "stage2_competitive": [_gate("stage2_competitive", "advance")],
         "stage3_risk": [_gate("stage3_risk", "advance")],
     }
-    reviewer_queue = (
-        gates["stage1_foundation"]
-        + gates["stage2_competitive"]
-        + gates["stage3_risk"]
-    )
+    reviewer_queue = gates["stage1_foundation"] + gates["stage2_competitive"] + gates["stage3_risk"]
 
     framing_model = FakeChatModel(structured_responses=[framing_response])
     research_model = FakeChatModel(structured_responses=research_queue)
@@ -246,16 +240,12 @@ async def test_continue_after_framing_drives_full_pipeline_to_completed(
         run = await session.get(Run, fresh_run)
         artifact_paths = sorted(
             r.path
-            for r in (
-                await session.execute(
-                    select(Artifact).where(Artifact.run_id == fresh_run)
-                )
-            ).scalars().all()
+            for r in (await session.execute(select(Artifact).where(Artifact.run_id == fresh_run)))
+            .scalars()
+            .all()
         )
         gate_count = len(
-            (
-                await session.execute(select(Gate).where(Gate.run_id == fresh_run))
-            ).scalars().all()
+            (await session.execute(select(Gate).where(Gate.run_id == fresh_run))).scalars().all()
         )
         message_count = len(
             (
@@ -265,7 +255,9 @@ async def test_continue_after_framing_drives_full_pipeline_to_completed(
                         Message.role == MessageRole.user,
                     )
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
 
     assert run is not None
@@ -328,13 +320,17 @@ async def test_continue_after_framing_honors_cooperative_cancel(
     async with AsyncSessionLocal() as session:
         run = await session.get(Run, fresh_run)
         run_cancelled_events = (
-            await session.execute(
-                select(Event).where(
-                    Event.run_id == fresh_run,
-                    Event.type == "run_cancelled",
+            (
+                await session.execute(
+                    select(Event).where(
+                        Event.run_id == fresh_run,
+                        Event.type == "run_cancelled",
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
     assert run is not None
     assert run.status == RunStatus.cancelled

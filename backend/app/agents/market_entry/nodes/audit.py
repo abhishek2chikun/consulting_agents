@@ -17,9 +17,7 @@ from app.models import Artifact, Run, RunStatus
 AUDIT_PATH = "audit.md"
 
 
-def build_audit_node(
-    *, model: object
-) -> Callable[[RunState], Awaitable[RunState]]:
+def build_audit_node(*, model: object) -> Callable[[RunState], Awaitable[RunState]]:
     system_prompt = load_prompt("audit")
 
     async def audit_node(state: RunState) -> RunState:

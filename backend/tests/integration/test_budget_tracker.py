@@ -64,13 +64,17 @@ async def test_budget_tracker_persists_totals_and_publishes_event(
     async with AsyncSessionLocal() as session:
         run = await session.get(Run, fresh_run)
         events = (
-            await session.execute(
-                select(Event).where(
-                    Event.run_id == fresh_run,
-                    Event.type == "usage_update",
+            (
+                await session.execute(
+                    select(Event).where(
+                        Event.run_id == fresh_run,
+                        Event.type == "usage_update",
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
     assert run is not None
     usage = run.model_snapshot.get("usage")
@@ -102,13 +106,17 @@ async def test_budget_tracker_skips_calls_without_usage_metadata(
     async with AsyncSessionLocal() as session:
         run = await session.get(Run, fresh_run)
         events = (
-            await session.execute(
-                select(Event).where(
-                    Event.run_id == fresh_run,
-                    Event.type == "usage_update",
+            (
+                await session.execute(
+                    select(Event).where(
+                        Event.run_id == fresh_run,
+                        Event.type == "usage_update",
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
     assert run is not None
     # No usage block created when nothing was tracked

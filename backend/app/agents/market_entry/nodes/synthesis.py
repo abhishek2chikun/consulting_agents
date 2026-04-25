@@ -32,9 +32,7 @@ def _format_artifacts(artifacts: dict[str, str]) -> str:
 def _format_evidence(rows: list[Evidence]) -> str:
     if not rows:
         return "(no evidence)"
-    return "\n".join(
-        f"[^{r.src_id}] {r.title} ({r.url or 'no-url'})" for r in rows
-    )
+    return "\n".join(f"[^{r.src_id}] {r.title} ({r.url or 'no-url'})" for r in rows)
 
 
 def _render_sources(rows: list[Evidence]) -> str:
@@ -47,9 +45,7 @@ def _render_sources(rows: list[Evidence]) -> str:
     return "\n".join(lines)
 
 
-def build_synthesis_node(
-    *, model: object
-) -> Callable[[RunState], Awaitable[RunState]]:
+def build_synthesis_node(*, model: object) -> Callable[[RunState], Awaitable[RunState]]:
     system_prompt = load_prompt("synthesis")
 
     async def synthesis_node(state: RunState) -> RunState:
@@ -59,11 +55,9 @@ def build_synthesis_node(
 
         async with AsyncSessionLocal() as session:
             evidence_rows = list(
-                (
-                    await session.execute(
-                        select(Evidence).where(Evidence.run_id == run_uuid)
-                    )
-                ).scalars().all()
+                (await session.execute(select(Evidence).where(Evidence.run_id == run_uuid)))
+                .scalars()
+                .all()
             )
 
         user_msg = (
@@ -84,9 +78,7 @@ def build_synthesis_node(
         known = {r.src_id for r in evidence_rows}
         unknown = cited - known
         if unknown:
-            raise CitationError(
-                f"synthesis cited unknown src_ids: {sorted(unknown)}"
-            )
+            raise CitationError(f"synthesis cited unknown src_ids: {sorted(unknown)}")
 
         full_report = body.rstrip() + "\n" + _render_sources(evidence_rows) + "\n"
 

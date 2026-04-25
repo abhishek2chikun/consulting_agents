@@ -62,11 +62,7 @@ async def test_reviewer_node_advance_writes_gate_and_state(
     assert out.get("target_agents") in (None, [])
 
     async with AsyncSessionLocal() as session:
-        rows = (
-            await session.execute(
-                select(Gate).where(Gate.run_id == run_id)
-            )
-        ).scalars().all()
+        rows = (await session.execute(select(Gate).where(Gate.run_id == run_id))).scalars().all()
     assert len(rows) == 1
     assert rows[0].stage == "stage1_foundation"
     assert rows[0].verdict == "advance"

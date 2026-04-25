@@ -80,13 +80,17 @@ async def test_framing_node_writes_questionnaire_artifact_and_state(
     # Artifact persisted with questionnaire JSON
     async with AsyncSessionLocal() as session:
         rows = (
-            await session.execute(
-                select(Artifact).where(
-                    Artifact.run_id == run_id,
-                    Artifact.path == "framing/questionnaire.json",
+            (
+                await session.execute(
+                    select(Artifact).where(
+                        Artifact.run_id == run_id,
+                        Artifact.path == "framing/questionnaire.json",
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert len(rows) == 1
     payload = json.loads(rows[0].content)
     assert [it["id"] for it in payload["items"]] == ["geography", "horizon"]

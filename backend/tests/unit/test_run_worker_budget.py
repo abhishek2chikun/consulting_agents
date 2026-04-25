@@ -40,12 +40,8 @@ def test_attach_budget_tracker_uses_run_id() -> None:
     bound_a = _attach_budget_tracker(FakeChatModel(), run_id=a, provider="anthropic")
     bound_b = _attach_budget_tracker(FakeChatModel(), run_id=b, provider="openai")
 
-    tracker_a = next(
-        h for h in _extract_callbacks(bound_a) if isinstance(h, BudgetTracker)
-    )
-    tracker_b = next(
-        h for h in _extract_callbacks(bound_b) if isinstance(h, BudgetTracker)
-    )
+    tracker_a = next(h for h in _extract_callbacks(bound_a) if isinstance(h, BudgetTracker))
+    tracker_b = next(h for h in _extract_callbacks(bound_b) if isinstance(h, BudgetTracker))
     assert tracker_a._run_id == a
     assert tracker_b._run_id == b
     assert tracker_a._provider == "anthropic"
