@@ -31,6 +31,13 @@ async def test_get_tasks_returns_seeded_catalog() -> None:
     assert by_slug["market_entry"]["enabled"] is True
     assert by_slug["ma"]["name"] == "M&A"
     assert by_slug["ma"]["enabled"] is True
+    assert by_slug["profitability"]["name"] == "Profitability"
+    assert by_slug["profitability"]["enabled"] is True
+    assert [slug for slug, task in by_slug.items() if task["enabled"]] == [
+        "ma",
+        "market_entry",
+        "profitability",
+    ]
 
 
 @pytest.mark.asyncio
