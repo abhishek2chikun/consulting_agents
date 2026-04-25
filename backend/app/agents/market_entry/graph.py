@@ -2,23 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from typing import Any
 
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 
+from app.agents._engine.edges import DEFAULT_MAX_STAGE_RETRIES
+from app.agents._engine.graph import ModelFactory, ToolsFactory, build_consulting_graph
+from app.agents._engine.state import FramingBrief, RunState
 from app.agents.market_entry.deepagents._smoke import smoke_node
-from app.agents.market_entry.edges import (
-    DEFAULT_MAX_STAGE_RETRIES,
-    make_route_after_reviewer,
-)
-from app.agents.market_entry.nodes.audit import build_audit_node
-from app.agents.market_entry.nodes.framing import build_framing_node
-from app.agents.market_entry.nodes.reviewer import make_reviewer_node
-from app.agents.market_entry.nodes.stage import make_stage_node
-from app.agents.market_entry.nodes.synthesis import build_synthesis_node
-from app.agents.market_entry.state import FramingBrief, RunState
+from app.agents.market_entry.profile import MARKET_ENTRY_PROFILE
 from app.core.config import get_settings
 
 
@@ -62,16 +56,6 @@ def build_graph(
     return graph.compile(checkpointer=checkpointer)
 
 
-# ---------------------------------------------------------------------------
-# Full pipeline (M6.10)
-# ---------------------------------------------------------------------------
-
-ModelFactory = Callable[[str], object]
-"""(role) -> chat model. Roles: framing|research|reviewer|synthesis|audit."""
-
-ToolsFactory = Callable[[], list[object]]
-
-
 def build_full_graph(
     *,
     model_factory: ModelFactory,
@@ -80,126 +64,15 @@ def build_full_graph(
     max_stage_retries: int = DEFAULT_MAX_STAGE_RETRIES,
     include_framing: bool = True,
 ) -> Any:
-    """Compile the full market-entry pipeline.
-
-    Pipeline:
-      START → framing → stage1 → reviewer1 → (stage1 | stage2)
-                                ↓ cancelled
-                                audit
-            stage2 → reviewer2 → (stage2 | stage3)
-            stage3 → reviewer3 → (stage3 | synthesis)
-            synthesis → audit → END
-
-    ``include_framing`` lets the run worker skip framing on the second
-    leg of the run (after the human submits answers we resume from
-    ``stage1_foundation``).
-    """
-    tools = tools_factory() if tools_factory is not None else []
-    max_attempts = max_stage_retries + 1
-
-    framing_model = model_factory("framing")
-    research_model = model_factory("research")
-    reviewer_model = model_factory("reviewer")
-    synthesis_model = model_factory("synthesis")
-    audit_model = model_factory("audit")
-
-    graph = StateGraph(RunState)
-    graph.add_node("framing", build_framing_node(model=framing_model))  # type: ignore[arg-type]
-
-    graph.add_node(
-        "stage1_foundation",
-        make_stage_node("stage1_foundation", model=research_model, tools=tools),  # type: ignore[arg-type]
+    """Compile the full market-entry pipeline."""
+    return build_consulting_graph(
+        MARKET_ENTRY_PROFILE,
+        model_factory=model_factory,
+        tools_factory=tools_factory,
+        checkpointer=checkpointer,
+        max_stage_retries=max_stage_retries,
+        include_framing=include_framing,
     )
-    graph.add_node(
-        "reviewer_stage1",
-        make_reviewer_node("stage1_foundation", model=reviewer_model),  # type: ignore[arg-type]
-    )
-
-    graph.add_node(
-        "stage2_competitive",
-        make_stage_node("stage2_competitive", model=research_model, tools=tools),  # type: ignore[arg-type]
-    )
-    graph.add_node(
-        "reviewer_stage2",
-        make_reviewer_node("stage2_competitive", model=reviewer_model),  # type: ignore[arg-type]
-    )
-
-    graph.add_node(
-        "stage3_risk",
-        make_stage_node("stage3_risk", model=research_model, tools=tools),  # type: ignore[arg-type]
-    )
-    graph.add_node(
-        "reviewer_stage3",
-        make_reviewer_node("stage3_risk", model=reviewer_model),  # type: ignore[arg-type]
-    )
-
-    graph.add_node("synthesis", build_synthesis_node(model=synthesis_model))  # type: ignore[arg-type]
-    graph.add_node("audit", build_audit_node(model=audit_model))  # type: ignore[arg-type]
-
-    if include_framing:
-        graph.add_edge(START, "framing")
-        # Framing node persists the questionnaire and waits for answers
-        # via the run worker (the worker resumes the graph at
-        # `stage1_foundation` after `submit_answers`). For tests we link
-        # framing directly to stage1 so a single `invoke()` flows
-        # through the whole pipeline; the run worker uses
-        # `include_framing=False` for its second leg.
-        graph.add_edge("framing", "stage1_foundation")
-    else:
-        graph.add_edge(START, "stage1_foundation")
-
-    graph.add_edge("stage1_foundation", "reviewer_stage1")
-    graph.add_conditional_edges(
-        "reviewer_stage1",
-        make_route_after_reviewer(
-            "stage1_foundation",
-            next_stage="stage2_competitive",
-            redo_stage="stage1_foundation",
-            max_attempts=max_attempts,
-        ),
-        {
-            "stage1_foundation": "stage1_foundation",
-            "stage2_competitive": "stage2_competitive",
-            "audit": "audit",
-        },
-    )
-
-    graph.add_edge("stage2_competitive", "reviewer_stage2")
-    graph.add_conditional_edges(
-        "reviewer_stage2",
-        make_route_after_reviewer(
-            "stage2_competitive",
-            next_stage="stage3_risk",
-            redo_stage="stage2_competitive",
-            max_attempts=max_attempts,
-        ),
-        {
-            "stage2_competitive": "stage2_competitive",
-            "stage3_risk": "stage3_risk",
-            "audit": "audit",
-        },
-    )
-
-    graph.add_edge("stage3_risk", "reviewer_stage3")
-    graph.add_conditional_edges(
-        "reviewer_stage3",
-        make_route_after_reviewer(
-            "stage3_risk",
-            next_stage="synthesis",
-            redo_stage="stage3_risk",
-            max_attempts=max_attempts,
-        ),
-        {
-            "stage3_risk": "stage3_risk",
-            "synthesis": "synthesis",
-            "audit": "audit",
-        },
-    )
-
-    graph.add_edge("synthesis", "audit")
-    graph.add_edge("audit", END)
-
-    return graph.compile(checkpointer=checkpointer)
 
 
 def postgres_checkpointer() -> Iterator[PostgresSaver]:
