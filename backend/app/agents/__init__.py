@@ -6,6 +6,7 @@ into the ``app.agents.llm`` submodule directly. Mirrors the pattern used
 by ``app.models``.
 """
 
+import app.agents.market_entry  # noqa: F401  # populate PROFILE_REGISTRY
 from app.agents.llm import (
     DEFAULT_PROVIDER,
     LLM_PROVIDERS,
