@@ -120,3 +120,17 @@ def test_audit_prompt_matches_runtime_artifact_path() -> None:
 
     assert "audit.md" in text
     assert "audit_report.md" not in text
+
+
+def test_audit_prompt_describes_only_runtime_inputs() -> None:
+    text = PRICING_PROFILE.load_prompt("audit").lower()
+
+    assert "final_report.md" in text
+    assert "gate_verdicts" in text
+    for unavailable_input in (
+        "stage artifacts",
+        "evidence references",
+        "evidence set",
+        "framing brief",
+    ):
+        assert unavailable_input not in text
