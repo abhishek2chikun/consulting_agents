@@ -25,8 +25,20 @@ MARKET_ENTRY_PROFILE = ConsultingProfile(
         ProfileStage(
             slug="stage3_risk",
             node_name="stage3_risk",
-            next_stage_node="synthesis",
+            next_stage_node="stage4_demand",
             prompt_file="stage3_risk.md",
+        ),
+        ProfileStage(
+            slug="stage4_demand",
+            node_name="stage4_demand",
+            next_stage_node="stage5_strategy",
+            prompt_file="stage4_demand.md",
+        ),
+        ProfileStage(
+            slug="stage5_strategy",
+            node_name="stage5_strategy",
+            next_stage_node="synthesis",
+            prompt_file="stage5_strategy.md",
         ),
     ),
     reviewer_prompt_package="app.agents.market_entry.prompts",

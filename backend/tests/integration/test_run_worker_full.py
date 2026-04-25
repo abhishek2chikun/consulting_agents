@@ -119,17 +119,31 @@ def _build_factories(
         "stage1_foundation": [_stage_payload("stage1_foundation", "s1")],
         "stage2_competitive": [_stage_payload("stage2_competitive", "s2")],
         "stage3_risk": [_stage_payload("stage3_risk", "s3")],
+        "stage4_demand": [_stage_payload("stage4_demand", "s4")],
+        "stage5_strategy": [_stage_payload("stage5_strategy", "s5")],
     }
     research_queue = (
-        stages["stage1_foundation"] + stages["stage2_competitive"] + stages["stage3_risk"]
+        stages["stage1_foundation"]
+        + stages["stage2_competitive"]
+        + stages["stage3_risk"]
+        + stages["stage4_demand"]
+        + stages["stage5_strategy"]
     )
 
     gates = gate_verdicts or {
         "stage1_foundation": [_gate("stage1_foundation", "advance")],
         "stage2_competitive": [_gate("stage2_competitive", "advance")],
         "stage3_risk": [_gate("stage3_risk", "advance")],
+        "stage4_demand": [_gate("stage4_demand", "advance")],
+        "stage5_strategy": [_gate("stage5_strategy", "advance")],
     }
-    reviewer_queue = gates["stage1_foundation"] + gates["stage2_competitive"] + gates["stage3_risk"]
+    reviewer_queue = (
+        gates["stage1_foundation"]
+        + gates["stage2_competitive"]
+        + gates["stage3_risk"]
+        + gates["stage4_demand"]
+        + gates["stage5_strategy"]
+    )
 
     framing_model = FakeChatModel(structured_responses=[framing_response])
     research_model = FakeChatModel(structured_responses=research_queue)
@@ -137,7 +151,10 @@ def _build_factories(
     synthesis_model = FakeChatModel(
         responses=[
             synthesis_text
-            or "# Final Report\n\n## Executive Summary\n- s1 [^s1] s2 [^s2] s3 [^s3].\n"
+            or (
+                "# Final Report\n\n## Executive Summary\n"
+                "- s1 [^s1] s2 [^s2] s3 [^s3] s4 [^s4] s5 [^s5].\n"
+            )
         ]
     )
     audit_model = FakeChatModel(
@@ -265,9 +282,11 @@ async def test_continue_after_framing_drives_full_pipeline_to_completed(
     assert "stage1_foundation/findings.md" in artifact_paths
     assert "stage2_competitive/findings.md" in artifact_paths
     assert "stage3_risk/findings.md" in artifact_paths
+    assert "stage4_demand/findings.md" in artifact_paths
+    assert "stage5_strategy/findings.md" in artifact_paths
     assert "final_report.md" in artifact_paths
     assert "audit.md" in artifact_paths
-    assert gate_count == 3
+    assert gate_count == 5
     # Answers persisted as a single user message
     assert message_count == 1
 

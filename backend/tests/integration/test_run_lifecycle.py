@@ -93,6 +93,8 @@ def _fresh_factory() -> ModelFactory:
             _stage_payload("stage1_foundation", "s1"),
             _stage_payload("stage2_competitive", "s2"),
             _stage_payload("stage3_risk", "s3"),
+            _stage_payload("stage4_demand", "s4"),
+            _stage_payload("stage5_strategy", "s5"),
         ]
     )
     reviewer_model = FakeChatModel(
@@ -100,10 +102,15 @@ def _fresh_factory() -> ModelFactory:
             _gate("stage1_foundation", "advance"),
             _gate("stage2_competitive", "advance"),
             _gate("stage3_risk", "advance"),
+            _gate("stage4_demand", "advance"),
+            _gate("stage5_strategy", "advance"),
         ]
     )
     synthesis_model = FakeChatModel(
-        responses=["# Final Report\n\n## Executive Summary\n- s1 [^s1] s2 [^s2] s3 [^s3].\n"]
+        responses=[
+            "# Final Report\n\n## Executive Summary\n"
+            "- s1 [^s1] s2 [^s2] s3 [^s3] s4 [^s4] s5 [^s5].\n"
+        ]
     )
     audit_model = FakeChatModel(
         responses=["## Weak Claims\n- none\n## Contradictions\n- none\n## Residual Gaps\n- none\n"]
@@ -297,6 +304,8 @@ async def test_answers_drive_full_pipeline_and_persist_artifacts(
         assert "stage1_foundation/findings.md" in artifact_paths
         assert "stage2_competitive/findings.md" in artifact_paths
         assert "stage3_risk/findings.md" in artifact_paths
+        assert "stage4_demand/findings.md" in artifact_paths
+        assert "stage5_strategy/findings.md" in artifact_paths
         assert "final_report.md" in artifact_paths
         assert "audit.md" in artifact_paths
     finally:
