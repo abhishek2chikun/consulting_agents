@@ -2,7 +2,7 @@
 
 The worker now drives the full LangGraph pipeline (framing → stages →
 synthesis → audit) instead of writing a hard-coded questionnaire, so we
-override `get_run_model_factory` with a `FakeChatModel`-backed factory
+override `get_run_model_factory_builder` with a `FakeChatModel`-backed factory
 to keep the test self-contained (no API keys, no network).
 """
 
@@ -11,13 +11,13 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import httpx
 import pytest
 from sqlalchemy import delete, select
 
-from app.api.runs import get_run_model_factory
+from app.api.runs import get_run_model_factory_builder
 from app.core.db import AsyncSessionLocal
 from app.main import create_app
 from app.models import Artifact, Message, Run, RunStatus
@@ -131,10 +131,12 @@ def _fresh_factory() -> ModelFactory:
 async def client() -> AsyncIterator[httpx.AsyncClient]:
     app = create_app()
 
-    async def _override() -> ModelFactory:
-        return _fresh_factory()
+    async def _override() -> Callable[[uuid.UUID], Awaitable[ModelFactory]]:
+        async def _build(_run_id: uuid.UUID) -> ModelFactory:
+            return _fresh_factory()
+        return _build
 
-    app.dependency_overrides[get_run_model_factory] = _override
+    app.dependency_overrides[get_run_model_factory_builder] = _override
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:

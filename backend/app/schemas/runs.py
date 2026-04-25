@@ -35,10 +35,27 @@ class ArtifactContentResponse(BaseModel):
     content: str
 
 
+class EvidenceItem(BaseModel):
+    """One row of `Run.evidence`, suitable for the SourcesSidebar."""
+
+    src_id: str
+    kind: str
+    url: str | None
+    title: str
+    snippet: str
+    provider: str
+
+
+class EvidenceListResponse(BaseModel):
+    evidence: list[EvidenceItem]
+
+
 __all__ = [
     "ArtifactContentResponse",
     "CreateRunRequest",
     "CreateRunResponse",
+    "EvidenceItem",
+    "EvidenceListResponse",
     "RunInfoResponse",
     "SubmitAnswersRequest",
 ]

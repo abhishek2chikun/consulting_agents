@@ -4,20 +4,25 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { toast } from "sonner";
 
+import { AgentTrace } from "@/components/AgentTrace";
 import { ChatStream } from "@/components/ChatStream";
 import { QuestionnaireForm } from "@/components/QuestionnaireForm";
+import { ReportView } from "@/components/ReportView";
+import { SourcesSidebar } from "@/components/SourcesSidebar";
+import { UsagePanel } from "@/components/UsagePanel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  cancelRun,
-  getRun,
-  getRunArtifact,
-  submitRunAnswers,
-} from "@/lib/api";
+import { getRun, getRunArtifact, submitRunAnswers } from "@/lib/api";
 import { useEventStream } from "@/lib/sse";
 import type { QuestionnaireSchema, RunInfoResponse } from "@/lib/types";
 
 const QUESTIONNAIRE_PATH = "framing/questionnaire.json";
+const RUN_LIFECYCLE_EVENTS = new Set([
+  "run_completed",
+  "run_failed",
+  "run_cancelled",
+  "cancel_ack",
+]);
 
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -29,13 +34,13 @@ export default function RunPage() {
   const runId = params.id;
 
   const [runInfo, setRunInfo] = useState<RunInfoResponse | null>(null);
-  const [questionnaire, setQuestionnaire] = useState<QuestionnaireSchema | null>(
-    null,
-  );
+  const [questionnaire, setQuestionnaire] =
+    useState<QuestionnaireSchema | null>(null);
   const [answersSubmitted, setAnswersSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [highlightedSrcId, setHighlightedSrcId] = useState<string | null>(null);
 
-  const { events, status } = useEventStream(runId);
+  const { events, status: connStatus } = useEventStream(runId);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -65,7 +70,6 @@ export default function RunPage() {
     if (bootstrapped.current) return;
     bootstrapped.current = true;
     void refresh();
-    // Try loading any pre-existing questionnaire (resume case).
     void getRunArtifact(runId, QUESTIONNAIRE_PATH)
       .then((artifact) => {
         setQuestionnaire(JSON.parse(artifact.content) as QuestionnaireSchema);
@@ -75,8 +79,7 @@ export default function RunPage() {
       });
   }, [refresh, runId]);
 
-  // Derive the most recent artifact_update event id targeting the
-  // questionnaire path. Pure function of `events` — no refs in render.
+  // Latest event id targeting the questionnaire artifact.
   const latestQuestionnaireEventId = useMemo(() => {
     let latest = 0;
     for (const evt of events) {
@@ -93,18 +96,32 @@ export default function RunPage() {
 
   useEffect(() => {
     if (latestQuestionnaireEventId > 0) {
-      // Synchronizing to an external system (the questionnaire artifact
-      // backed by Postgres + SSE) — fetch is intentional here.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       void loadQuestionnaire();
     }
   }, [latestQuestionnaireEventId, loadQuestionnaire]);
 
-  const artifactSummary = useMemo(() => {
-    if (runInfo === null) return "Loading…";
-    if (runInfo.artifact_paths.length === 0) return "No artifacts yet";
-    return runInfo.artifact_paths.join("\n");
-  }, [runInfo]);
+  // Refresh run metadata whenever a lifecycle event lands so
+  // `runInfo.status` stays current (drives Cancel button + status
+  // pill). We key off the latest matching event id.
+  const latestLifecycleEventId = useMemo(() => {
+    let latest = 0;
+    for (const evt of events) {
+      if (RUN_LIFECYCLE_EVENTS.has(evt.type) && evt.id > latest) {
+        latest = evt.id;
+      }
+    }
+    return latest;
+  }, [events]);
+
+  useEffect(() => {
+    if (latestLifecycleEventId > 0) {
+      // Synchronizing run metadata to lifecycle SSE events backed by
+      // Postgres — this is the documented external-system sync case.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void refresh();
+    }
+  }, [latestLifecycleEventId, refresh]);
 
   const handleAnswers = async (answers: Record<string, string>) => {
     try {
@@ -117,68 +134,86 @@ export default function RunPage() {
     }
   };
 
-  const doCancel = async () => {
-    try {
-      await cancelRun(runId);
-      toast.success("Cancellation requested");
-      await refresh();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
-  };
+  const runStatus = runInfo?.status;
 
   return (
-    <main className="mx-auto max-w-4xl p-8 space-y-6">
-      <header>
-        <h1 className="text-3xl font-semibold tracking-tight">Run {runId}</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Run view (M6.3): metadata, framing questionnaire, and SSE event stream.
-        </p>
+    <main className="mx-auto max-w-[1600px] space-y-4 p-6">
+      <header className="flex items-baseline justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Run {runId}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            task: <span className="font-mono">{runInfo?.task_type ?? "-"}</span>
+            {" · "}status:{" "}
+            <span className="font-mono">
+              {runStatus ?? (loading ? "loading" : "unknown")}
+            </span>
+          </p>
+        </div>
+        <Button variant="outline" onClick={() => void refresh()} disabled={loading}>
+          Refresh
+        </Button>
       </header>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Run metadata</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          <div>status: {runInfo?.status ?? (loading ? "loading" : "unknown")}</div>
-          <div>task: {runInfo?.task_type ?? "-"}</div>
-          <div>goal: {runInfo?.goal ?? "-"}</div>
-          <pre className="rounded border p-3 text-xs whitespace-pre-wrap">{artifactSummary}</pre>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => void refresh()} disabled={loading}>
-              Refresh
-            </Button>
-            <Button variant="destructive" onClick={() => void doCancel()}>
-              Cancel run
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+      {runInfo && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Goal</CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm whitespace-pre-wrap">
+            {runInfo.goal}
+          </CardContent>
+        </Card>
+      )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Framing questionnaire</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {questionnaire === null ? (
-            <p className="text-sm text-muted-foreground">
-              Waiting for the framing agent to produce the questionnaire…
-            </p>
-          ) : answersSubmitted ? (
-            <p className="text-sm text-muted-foreground">
-              Answers submitted. The research agents are now working.
-            </p>
-          ) : (
+      {questionnaire !== null && !answersSubmitted && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Framing questionnaire</CardTitle>
+          </CardHeader>
+          <CardContent>
             <QuestionnaireForm
               schema={questionnaire}
               onSubmit={handleAnswers}
             />
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
-      <ChatStream runId={runId} events={events} status={status} />
+      {/*
+       * 4-pane workspace (M7.6):
+       *   left   — chat + agent trace
+       *   center — final report
+       *   right  — sources + usage/cancel
+       *
+       * Collapses to a single column under `lg`.
+       */}
+      <section className="grid gap-4 lg:grid-cols-12">
+        <div className="space-y-4 lg:col-span-4">
+          <div className="h-[28rem]">
+            <ChatStream runId={runId} events={events} status={connStatus} />
+          </div>
+          <AgentTrace events={events} />
+        </div>
+
+        <div className="lg:col-span-5">
+          <ReportView
+            runId={runId}
+            events={events}
+            onCitationClick={setHighlightedSrcId}
+          />
+        </div>
+
+        <div className="space-y-4 lg:col-span-3">
+          <UsagePanel runId={runId} events={events} status={runStatus} />
+          <div className="h-[36rem]">
+            <SourcesSidebar
+              runId={runId}
+              events={events}
+              highlightedSrcId={highlightedSrcId}
+            />
+          </div>
+        </div>
+      </section>
     </main>
   );
 }

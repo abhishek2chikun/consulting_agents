@@ -27,6 +27,7 @@
 import type {
   ArtifactContentResponse,
   CreateRunResponse,
+  EvidenceListResponse,
   ModelOverridesMap,
   PingResponse,
   ProviderName,
@@ -185,3 +186,6 @@ export const getRunArtifact = (
   request<ArtifactContentResponse>(
     `/runs/${runId}/artifacts/${artifactPath}`,
   );
+
+export const getRunEvidence = (runId: string): Promise<EvidenceListResponse> =>
+  request<EvidenceListResponse>(`/runs/${runId}/evidence`);
