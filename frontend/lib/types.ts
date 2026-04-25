@@ -110,6 +110,23 @@ export interface ArtifactContentResponse {
 }
 
 /**
+ * Mirrors `app/schemas/runs.py::EvidenceItem` (M7.4).
+ * One row of `Run.evidence`, rendered by `<SourcesSidebar>`.
+ */
+export interface EvidenceItem {
+  src_id: string;
+  kind: "web" | "doc";
+  url: string | null;
+  title: string;
+  snippet: string;
+  provider: string;
+}
+
+export interface EvidenceListResponse {
+  evidence: EvidenceItem[];
+}
+
+/**
  * Mirrors `app/schemas/framing.py::QuestionItem`.
  * Rendered by `<QuestionnaireForm>`.
  */

@@ -26,7 +26,8 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from app.agents.llm import get_chat_model
+from app.agents.budget import BudgetTracker
+from app.agents.llm import get_chat_model, provider_name_for
 from app.agents.market_entry.graph import build_full_graph
 from app.agents.market_entry.nodes.framing import build_framing_node
 from app.core.db import AsyncSessionLocal
@@ -36,6 +37,24 @@ from app.models import Message, MessageRole, Run, RunStatus
 ModelFactory = Callable[[str], object]
 ModelFactoryFactory = Callable[[], Awaitable[ModelFactory]]
 
+
+def _attach_budget_tracker(
+    model: object,
+    *,
+    run_id: uuid.UUID,
+    provider: str,
+) -> object:
+    """Wrap `model` with a BudgetTracker callback bound to `run_id`.
+
+    The wrapped object is a `RunnableBinding` that preserves
+    `with_structured_output`, `bind_tools`, `ainvoke`, etc., so the
+    stage / reviewer / synthesis / audit nodes can use it as a drop-in
+    replacement for the raw chat model.
+    """
+    tracker = BudgetTracker(run_id=run_id, provider=provider)
+    # `with_config` exists on every Runnable (BaseChatModel inherits it).
+    return model.with_config(callbacks=[tracker])  # type: ignore[attr-defined]
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,19 +63,32 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-async def default_model_factory() -> ModelFactory:
+async def default_model_factory(run_id: uuid.UUID | None = None) -> ModelFactory:
     """Resolve real chat models for every role and return a sync factory.
 
     All five roles are resolved up-front so the synchronous
     ``model_factory(role)`` callback expected by ``build_full_graph``
     can return a cached instance per role without hitting the DB during
     graph compilation.
+
+    When ``run_id`` is provided, each resolved model is wrapped with a
+    :class:`BudgetTracker` callback bound to that run, so every chat
+    call accumulates token + cost telemetry on
+    ``Run.model_snapshot["usage"]`` and emits a ``usage_update`` SSE
+    event. ``run_id`` is optional only for diagnostic call sites
+    (``/ping``); production paths always pass it.
     """
     roles = ("framing", "research", "reviewer", "synthesis", "audit")
     cache: dict[str, object] = {}
     async with AsyncSessionLocal() as session:
         for role in roles:
-            cache[role] = await get_chat_model(role, session=session)
+            resolved: object = await get_chat_model(role, session=session)
+            if run_id is not None:
+                provider = provider_name_for(resolved)  # type: ignore[arg-type]
+                resolved = _attach_budget_tracker(
+                    resolved, run_id=run_id, provider=provider
+                )
+            cache[role] = resolved
 
     def _factory(role: str) -> object:
         return cache[role]
@@ -75,7 +107,7 @@ async def start_framing(
     model_factory: ModelFactory | None = None,
 ) -> None:
     """Run only the framing node so the questionnaire is ready to render."""
-    factory = model_factory or await default_model_factory()
+    factory = model_factory or await default_model_factory(run_id)
 
     async with AsyncSessionLocal() as session:
         run = await session.get(Run, run_id)
@@ -111,7 +143,7 @@ async def continue_after_framing(
     model_factory: ModelFactory | None = None,
 ) -> None:
     """Persist answers and drive the full pipeline through audit."""
-    factory = model_factory or await default_model_factory()
+    factory = model_factory or await default_model_factory(run_id)
 
     # 1. Persist answers as a single user-role message (audit trail).
     async with AsyncSessionLocal() as session:

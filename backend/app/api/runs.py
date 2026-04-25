@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -14,11 +15,13 @@ from app.core.db import get_session
 from app.core.events import publish
 from app.core.sse import stream_run_events
 from app.core.task_registry import TASK_REGISTRY
-from app.models import Artifact, Run, RunStatus
+from app.models import Artifact, Evidence, Run, RunStatus
 from app.schemas.runs import (
     ArtifactContentResponse,
     CreateRunRequest,
     CreateRunResponse,
+    EvidenceItem,
+    EvidenceListResponse,
     RunInfoResponse,
     SubmitAnswersRequest,
 )
@@ -34,26 +37,36 @@ router = APIRouter(prefix="/runs", tags=["runs"])
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
+# A "model factory builder" is a coroutine that takes a run_id and
+# returns the per-role chat-model factory. We resolve the factory at
+# request-handler time (not at dependency-resolution time) because the
+# factory needs the run_id to attach the BudgetTracker callback.
+ModelFactoryBuilder = Callable[[uuid.UUID], Awaitable[ModelFactory]]
 
-async def get_run_model_factory() -> ModelFactory:
-    """Resolve the per-role chat-model factory used by the run worker.
 
-    Production wiring resolves real chat models from the encrypted
-    settings store. Tests override this dependency via
-    `app.dependency_overrides[get_run_model_factory]` to inject a
-    `FakeChatModel`-backed factory and avoid network calls / API keys.
+async def get_run_model_factory_builder() -> ModelFactoryBuilder:
+    """Resolve the per-run chat-model factory builder.
+
+    Production wiring delegates to :func:`default_model_factory`, which
+    resolves real chat models from the encrypted settings store and
+    wraps each with a :class:`BudgetTracker` callback bound to the run.
+    Tests override this dependency via
+    ``app.dependency_overrides[get_run_model_factory_builder]`` to
+    inject a `FakeChatModel`-backed factory and avoid network calls.
     """
-    return await default_model_factory()
+    return default_model_factory
 
 
-ModelFactoryDep = Annotated[ModelFactory, Depends(get_run_model_factory)]
+ModelFactoryBuilderDep = Annotated[
+    ModelFactoryBuilder, Depends(get_run_model_factory_builder)
+]
 
 
 @router.post("", response_model=CreateRunResponse, status_code=status.HTTP_201_CREATED)
 async def create_run(
     body: CreateRunRequest,
     session: SessionDep,
-    model_factory: ModelFactoryDep,
+    factory_builder: ModelFactoryBuilderDep,
 ) -> CreateRunResponse:
     svc = RunService(session)
     try:
@@ -65,6 +78,7 @@ async def create_run(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    model_factory = await factory_builder(run.id)
     TASK_REGISTRY.spawn(
         f"run:{run.id}",
         start_framing(run.id, model_factory=model_factory),
@@ -77,7 +91,7 @@ async def submit_answers(
     run_id: uuid.UUID,
     body: SubmitAnswersRequest,
     session: SessionDep,
-    model_factory: ModelFactoryDep,
+    factory_builder: ModelFactoryBuilderDep,
 ) -> None:
     run = await session.get(Run, run_id)
     if run is None:
@@ -86,6 +100,7 @@ async def submit_answers(
     run.status = RunStatus.running
     await session.commit()
 
+    model_factory = await factory_builder(run_id)
     TASK_REGISTRY.spawn(
         f"run:{run_id}",
         continue_after_framing(run_id, body.answers, model_factory=model_factory),
@@ -116,6 +131,44 @@ async def get_run(run_id: uuid.UUID, session: SessionDep) -> RunInfoResponse:
         goal=run.goal,
         status=run.status.value,
         artifact_paths=paths,
+    )
+
+
+@router.get("/{run_id}/evidence", response_model=EvidenceListResponse)
+async def list_evidence(
+    run_id: uuid.UUID,
+    session: SessionDep,
+) -> EvidenceListResponse:
+    """Return every Evidence row for a run, in insertion order.
+
+    Used by the frontend SourcesSidebar to render full source cards
+    when the user clicks a `[^src_id]` chip in the report. We return
+    `404` when the run itself doesn't exist (vs. an empty list when
+    the run exists but has no evidence yet).
+    """
+    run = await session.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    rows = (
+        await session.execute(
+            select(Evidence)
+            .where(Evidence.run_id == run_id)
+            .order_by(Evidence.accessed_at, Evidence.src_id)
+        )
+    ).scalars().all()
+    return EvidenceListResponse(
+        evidence=[
+            EvidenceItem(
+                src_id=r.src_id,
+                kind=r.kind.value,
+                url=r.url,
+                title=r.title,
+                snippet=r.snippet,
+                provider=r.provider,
+            )
+            for r in rows
+        ]
     )
 
 
