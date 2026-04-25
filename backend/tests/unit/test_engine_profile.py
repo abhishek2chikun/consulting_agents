@@ -72,3 +72,19 @@ def test_validation_at_construction() -> None:
             synthesis_prompt="synthesis.md",
             audit_prompt="audit.md",
         ).validate()
+
+
+def test_invalid_prompt_package_preserves_import_error() -> None:
+    """Broken package wiring should keep the original import failure type."""
+    with pytest.raises(ModuleNotFoundError):
+        ConsultingProfile(
+            slug="bad_package",
+            display_name="Bad Package",
+            prompts_package="app.agents.does_not_exist.prompts",
+            framing_prompt="framing.md",
+            stages=(),
+            reviewer_prompt_package="app.agents.market_entry.prompts",
+            reviewer_prompt="reviewer.md",
+            synthesis_prompt="synthesis.md",
+            audit_prompt="audit.md",
+        ).validate()

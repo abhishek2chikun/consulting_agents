@@ -68,9 +68,4 @@ class ConsultingProfile:
 
     @staticmethod
     def _read(package: str, filename: str) -> str:
-        try:
-            return resources.files(package).joinpath(filename).read_text(encoding="utf-8")
-        except FileNotFoundError:
-            raise
-        except Exception as exc:  # pragma: no cover - unwrap importlib edge cases
-            raise FileNotFoundError(f"{package}/{filename}: {exc}") from exc
+        return resources.files(package).joinpath(filename).read_text(encoding="utf-8")
