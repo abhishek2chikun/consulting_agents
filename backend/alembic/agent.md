@@ -1,16 +1,20 @@
 # alembic — agent.md
 
 ## Status
-**Active (revisions 0001, 0002, 0003)**
-Async-template Alembic. Three revisions:
+**Active (revisions 0001, 0002, 0003, 0004, 0005)**
+Async-template Alembic. Five revisions:
 `0001_baseline` (empty chain anchor), `0002_users_and_settings`
-(creates `users` + `settings_kv`, seeds the V1 singleton user), and
+(creates `users` + `settings_kv`, seeds the V1 singleton user),
 `0003_provider_keys` (creates `provider_keys` with unique
-`(user_id, provider)` constraint and `user_id` index). All ORM models
-live under `app.models`; `env.py` imports `app.models` explicitly to
-register all ORM classes on `Base.metadata` for autogenerate. Importing
-`Base` alone is NOT sufficient — the model modules must be imported for
-their `mapped_column` declarations to run.
+`(user_id, provider)` constraint and `user_id` index),
+`0004_task_catalog` (creates `task_types` and seeds the V1 catalog:
+`market_entry` enabled, `ma` disabled), and `0005_documents_and_chunks`
+(creates `documents` + `chunks` with pgvector HNSW cosine index;
+embedding dimension sourced from `EMBEDDING_DIM` env var, default 1536).
+All ORM models live under `app.models`; `env.py` imports `app.models`
+explicitly to register all ORM classes on `Base.metadata` for
+autogenerate. Importing `Base` alone is NOT sufficient — the model
+modules must be imported for their `mapped_column` declarations to run.
 
 ---
 
@@ -39,6 +43,8 @@ backend/
       0001_baseline.py            # empty baseline revision
       0002_users_and_settings.py  # users + settings_kv + singleton seed
       0003_provider_keys.py       # provider_keys (encrypted API keys)
+      0004_task_catalog.py        # task_types + market_entry/ma seed
+      0005_documents_and_chunks.py # documents + chunks + HNSW cosine index
 ```
 ### Corresponding Tests
 ```text
@@ -118,14 +124,36 @@ standard Alembic contract.
   `updated_at`, unique constraint `uq_provider_keys_user_provider` on
   `(user_id, provider)`). `alembic check` reports no drift; downgrade →
   upgrade round-trip clean.
+- `0004_task_catalog.py` — creates `task_types` (`slug` String(64) PK,
+  `name` String(128) NOT NULL, `description` Text NULL, `enabled`
+  Boolean NOT NULL with `server_default text("false")`). Seeds the V1
+  catalog via parameterised `op.execute(sa.text(...).bindparams(...))`
+  with `ON CONFLICT (slug) DO NOTHING` (idempotent across
+  downgrade/upgrade). Bind params keep the description literals out of
+  the SQL string so the seed survives lint without awkward
+  string-concat trickery. `alembic check` reports no drift; downgrade →
+  upgrade round-trip clean and re-seeds correctly.
+- `0005_documents_and_chunks.py` — creates the `document_status`
+  Postgres enum (auto-created by the column-bound `sa.Enum`), the
+  `documents` table (id UUID PK, user_id UUID FK -> users.id ON DELETE
+  CASCADE indexed, filename/mime/size, status enum server_default
+  `'pending'`, error nullable, created_at/updated_at server-defaulted
+  to `now()`), and the `chunks` table (id UUID PK, document_id UUID FK
+  -> documents.id ON DELETE CASCADE indexed, ord int, text, embedding
+  `vector(N)` where N is read from `EMBEDDING_DIM` (default 1536) at
+  migration time, embedding_model String(128), metadata JSONB
+  server_default `'{}'::jsonb`). Adds HNSW index
+  `ix_chunks_embedding_hnsw` over `chunks.embedding` with
+  `vector_cosine_ops` for cosine-distance similarity search. Pure SQL
+  raw `op.execute(...)` for the index because Alembic has no built-in
+  HNSW DDL helper. `alembic check` reports no drift; downgrade →
+  upgrade round-trip clean and re-creates the HNSW index.
 
 ## Next Steps
-1. M2.2 — `runs`, `stages`, `artifacts` tables (autogenerate from new
-   models in `app.models`; review the diff carefully before committing).
-2. Add a `pgvector` extension migration (`CREATE EXTENSION IF NOT EXISTS
-   vector`) once the embedding table lands.
-3. Wire migrations into CI against an ephemeral Postgres service.
-4. Once any model is added without re-importing in `app/models/__init__.py`,
+1. M3.3+ — extraction / chunking / embedding pipeline (writes to
+   `documents` + `chunks`).
+2. Wire migrations into CI against an ephemeral Postgres service.
+3. Once any model is added without re-importing in `app/models/__init__.py`,
    autogenerate will silently miss it — keep the registry in sync.
 
 ## Known Issues / Blockers
@@ -136,3 +164,10 @@ standard Alembic contract.
 - No automatic check that `target_metadata` is empty vs the live DB; the
   baseline relies on humans not forgetting to import models before
   autogenerating.
+- `0005`'s `embedding_dim` is read from `EMBEDDING_DIM` at migration
+  execution time (NOT from `Settings`). Changing the env var between
+  upgrade and a future migration produces a mismatched vector dim.
+  Always set `EMBEDDING_DIM` consistently across the runtime app and
+  the migration shell. If you need to resize, write a follow-up
+  migration that explicitly `ALTER TABLE chunks ALTER COLUMN embedding
+  TYPE vector(N')` (and rebuild the HNSW index).

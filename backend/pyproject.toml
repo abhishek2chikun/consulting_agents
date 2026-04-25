@@ -19,6 +19,10 @@ dependencies = [
     "langchain-google-genai>=4.2.2",
     "langchain-aws>=1.4.5",
     "langchain-ollama>=1.1.0",
+    "pgvector>=0.4.2",
+    "python-multipart>=0.0.26",
+    "docling>=2.91.0",
+    "tiktoken>=0.12.0",
 ]
 
 [dependency-groups]
@@ -30,6 +34,7 @@ dev = [
     "ruff>=0.7",
     "mypy>=1.13",
     "pre-commit>=4.0",
+    "numpy>=2.4.4",
 ]
 
 [build-system]
@@ -48,3 +53,7 @@ asyncio_mode = "auto"
 asyncio_default_test_loop_scope = "session"
 asyncio_default_fixture_loop_scope = "session"
 testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (e.g. first-run model downloads); deselect with -m 'not slow'",
+    "integration: marks tests as integration (requires live external services like Postgres or OpenAI)",
+]

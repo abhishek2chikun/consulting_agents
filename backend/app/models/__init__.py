@@ -10,8 +10,20 @@ One ORM class per file. This package re-exports them so that:
 Add new models here as they are introduced.
 """
 
+from app.models.chunk import Chunk
+from app.models.document import Document, DocumentStatus
 from app.models.provider_key import ProviderKey
 from app.models.settings_kv import SettingKV
+from app.models.task_type import TaskType
 from app.models.user import SINGLETON_USER_ID, User
 
-__all__ = ["SINGLETON_USER_ID", "ProviderKey", "SettingKV", "User"]
+__all__ = [
+    "SINGLETON_USER_ID",
+    "Chunk",
+    "Document",
+    "DocumentStatus",
+    "ProviderKey",
+    "SettingKV",
+    "TaskType",
+    "User",
+]

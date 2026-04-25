@@ -4,6 +4,9 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Local upload storage (M3.3); the directory is recreated on demand.
+data/
+
 # Local tooling configs (user-specific)
 opencode.json
 
