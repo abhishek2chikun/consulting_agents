@@ -81,9 +81,9 @@ def cost_for(
     price = lookup_price(provider, model)
     if price is None:
         return 0.0
-    return (input_tokens / 1_000_000) * price["input"] + (
-        output_tokens / 1_000_000
-    ) * price["output"]
+    return (input_tokens / 1_000_000) * price["input"] + (output_tokens / 1_000_000) * price[
+        "output"
+    ]
 
 
 __all__ = ["PRICE_TABLE", "TokenPrice", "cost_for", "lookup_price"]

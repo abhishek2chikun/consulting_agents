@@ -55,6 +55,7 @@ def _attach_budget_tracker(
     # `with_config` exists on every Runnable (BaseChatModel inherits it).
     return model.with_config(callbacks=[tracker])  # type: ignore[attr-defined]
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,9 +86,7 @@ async def default_model_factory(run_id: uuid.UUID | None = None) -> ModelFactory
             resolved: object = await get_chat_model(role, session=session)
             if run_id is not None:
                 provider = provider_name_for(resolved)  # type: ignore[arg-type]
-                resolved = _attach_budget_tracker(
-                    resolved, run_id=run_id, provider=provider
-                )
+                resolved = _attach_budget_tracker(resolved, run_id=run_id, provider=provider)
             cache[role] = resolved
 
     def _factory(role: str) -> object:

@@ -64,9 +64,7 @@ def make_reviewer_node(
 
         # Force stage_slug + attempt to authoritative coordinator values
         # (model may echo them but we don't trust those fields).
-        verdict_model = verdict_model.model_copy(
-            update={"stage": stage_slug, "attempt": attempt}
-        )
+        verdict_model = verdict_model.model_copy(update={"stage": stage_slug, "attempt": attempt})
 
         run_uuid = uuid.UUID(state["run_id"])
         async with AsyncSessionLocal() as session:

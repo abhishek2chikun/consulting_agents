@@ -78,9 +78,7 @@ class BudgetTracker(AsyncCallbackHandler):
                     call_cost=call_cost,
                 )
             except Exception:  # pragma: no cover - defensive
-                logger.exception(
-                    "BudgetTracker failed to update run %s", self._run_id
-                )
+                logger.exception("BudgetTracker failed to update run %s", self._run_id)
                 return
 
         # Publish outside the lock so SSE backpressure can't stall the

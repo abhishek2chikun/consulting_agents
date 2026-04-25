@@ -103,14 +103,10 @@ def _fresh_factory() -> ModelFactory:
         ]
     )
     synthesis_model = FakeChatModel(
-        responses=[
-            "# Final Report\n\n## Executive Summary\n- s1 [^s1] s2 [^s2] s3 [^s3].\n"
-        ]
+        responses=["# Final Report\n\n## Executive Summary\n- s1 [^s1] s2 [^s2] s3 [^s3].\n"]
     )
     audit_model = FakeChatModel(
-        responses=[
-            "## Weak Claims\n- none\n## Contradictions\n- none\n## Residual Gaps\n- none\n"
-        ]
+        responses=["## Weak Claims\n- none\n## Contradictions\n- none\n## Residual Gaps\n- none\n"]
     )
 
     cache: dict[str, FakeChatModel] = {
@@ -134,6 +130,7 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
     async def _override() -> Callable[[uuid.UUID], Awaitable[ModelFactory]]:
         async def _build(_run_id: uuid.UUID) -> ModelFactory:
             return _fresh_factory()
+
         return _build
 
     app.dependency_overrides[get_run_model_factory_builder] = _override
@@ -285,17 +282,17 @@ async def test_answers_drive_full_pipeline_and_persist_artifacts(
 
         async with AsyncSessionLocal() as session:
             messages = (
-                await session.execute(select(Message).where(Message.run_id == run_id))
-            ).scalars().all()
+                (await session.execute(select(Message).where(Message.run_id == run_id)))
+                .scalars()
+                .all()
+            )
             assert len(messages) == 1
 
             artifact_paths = {
                 a.path
-                for a in (
-                    await session.execute(
-                        select(Artifact).where(Artifact.run_id == run_id)
-                    )
-                ).scalars().all()
+                for a in (await session.execute(select(Artifact).where(Artifact.run_id == run_id)))
+                .scalars()
+                .all()
             }
         assert "stage1_foundation/findings.md" in artifact_paths
         assert "stage2_competitive/findings.md" in artifact_paths
