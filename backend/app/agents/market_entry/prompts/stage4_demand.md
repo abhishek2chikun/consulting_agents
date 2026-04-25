@@ -4,28 +4,37 @@ You are conducting market-entry research for the objective and target market
 defined in the framing brief. Stages 1-3 have produced foundation, competitive,
 and risk findings; your task in this stage is to validate end-customer demand.
 
-## Required Outputs
-
-Use the available web-search and document tools to gather evidence, then write a
-section to `final_report.md` (append) under the heading `## Demand Validation`
-containing at minimum:
-
-1. **Market signals** - quantified buyer demand (search interest trends,
-   adoption rates, willingness-to-pay indicators) with citations.
-2. **Customer segments** - 2-4 target segments with size estimates and
-   pain-point evidence, citations required.
-3. **Demand drivers** - 3-5 factors expanding or contracting demand
-   over the next 24 months.
-4. **Validation gaps** - what additional primary research would
-   strengthen confidence.
-
-Cite every quantitative claim using `[1]`, `[2]` style markers and append
-a `### References` subsection with full URLs.
-
 ## Tool Usage
 
-- Use the web search tool for current market data.
-- Use document retrieval tools for any uploaded research artifacts.
+- Use `rag_search` first for uploaded research artifacts.
+- Use `web_search` for current market data.
+- Use `fetch_url` only when a deeper read of a specific URL is justified.
 - Do not fabricate statistics; if data is unavailable, state so explicitly.
+
+## Output Contract
+
+Return a structured `StageOutput` object. Include exactly one Markdown artifact
+in `artifacts`:
+
+- `stage4_demand.md`
+
+The artifact content must include a `## Demand Validation` section containing at
+minimum:
+
+1. **Market signals** - quantified buyer demand such as search interest trends,
+   adoption rates, or willingness-to-pay indicators.
+2. **Customer segments** - 2-4 target segments with size estimates and
+   pain-point evidence.
+3. **Demand drivers** - 3-5 factors expanding or contracting demand over the
+   next 24 months.
+4. **Validation gaps** - additional primary research that would strengthen
+   confidence.
+
+Every factual or key claim in the artifact content MUST end with one or more
+`[^src_id]` citation tokens returned by the search/RAG tools. Do not use
+numbered citation markers or manually written References/Sources sections.
+
+The `evidence` list MUST include a matching `src_id` value for every `[^src_id]`
+token used in the artifact content.
 
 When complete, end your response with the literal token `STAGE_COMPLETE`.
