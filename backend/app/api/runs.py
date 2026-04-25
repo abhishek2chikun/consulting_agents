@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agents.ma import run_ma_stub
 from app.core.db import get_session
 from app.core.events import publish
 from app.core.sse import stream_run_events
@@ -57,9 +58,7 @@ async def get_run_model_factory_builder() -> ModelFactoryBuilder:
     return default_model_factory
 
 
-ModelFactoryBuilderDep = Annotated[
-    ModelFactoryBuilder, Depends(get_run_model_factory_builder)
-]
+ModelFactoryBuilderDep = Annotated[ModelFactoryBuilder, Depends(get_run_model_factory_builder)]
 
 
 @router.post("", response_model=CreateRunResponse, status_code=status.HTTP_201_CREATED)
@@ -78,11 +77,18 @@ async def create_run(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    model_factory = await factory_builder(run.id)
-    TASK_REGISTRY.spawn(
-        f"run:{run.id}",
-        start_framing(run.id, model_factory=model_factory),
-    )
+    if run.task_id == "ma":
+        # M&A V2 stub — no framing step, no questionnaire, and crucially
+        # no LLM calls (so no model factory needed). The single-node
+        # graph writes `final_report.md` and transitions the run to
+        # `completed` immediately.
+        TASK_REGISTRY.spawn(f"run:{run.id}", run_ma_stub(run.id))
+    else:
+        model_factory = await factory_builder(run.id)
+        TASK_REGISTRY.spawn(
+            f"run:{run.id}",
+            start_framing(run.id, model_factory=model_factory),
+        )
     return CreateRunResponse(run_id=run.id)
 
 
@@ -151,12 +157,16 @@ async def list_evidence(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
 
     rows = (
-        await session.execute(
-            select(Evidence)
-            .where(Evidence.run_id == run_id)
-            .order_by(Evidence.accessed_at, Evidence.src_id)
+        (
+            await session.execute(
+                select(Evidence)
+                .where(Evidence.run_id == run_id)
+                .order_by(Evidence.accessed_at, Evidence.src_id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return EvidenceListResponse(
         evidence=[
             EvidenceItem(
