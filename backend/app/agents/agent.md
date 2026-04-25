@@ -1,13 +1,16 @@
 # app.agents — agent.md
 
 ## Status
-**Active (M2.6).** Hosts the LLM provider registry, the
+**Active (M3.7).** Hosts the LLM provider registry, the
 `get_chat_model(role, *, session)` factory used by every downstream
-agent node, and the `provider_name_for(model)` helper that maps a
+agent node, the `provider_name_for(model)` helper that maps a
 constructed LangChain client back to its registry key (consumed by
-`app.api.ping` in M2.6). Future home of the LangGraph-based agent
-runtime (framing, planning, retrieval, drafting, critique, packaging)
-and the DeepAgents wiring.
+`app.api.ping` in M2.6), and (M3.7) the `tools/` subpackage of
+`@tool`-decorated callables that agent nodes will bind to LLMs. V1
+ships a single tool: `rag_search` (vector similarity over ingested
+chunks). Future home of the LangGraph-based agent runtime (framing,
+planning, retrieval, drafting, critique, packaging) and the
+DeepAgents wiring.
 
 ---
 
@@ -34,6 +37,10 @@ key) is a settings update, never a code change.
 app/agents/
   __init__.py          # package marker
   llm.py               # PROVIDER_REGISTRY + get_chat_model factory
+  tools/               # M3.7 — @tool-decorated callables (RAG, web search, ...)
+    __init__.py
+    rag_search.py      # @tool rag_search — pgvector cosine over chunks
+    agent.md
 ```
 
 ### Corresponding Tests
@@ -137,6 +144,14 @@ about caching.
   `from app.agents import ...` (mirrors `app.models`). Inline
   `# type: ignore[arg-type]` on `_openai_factory` now carries the same
   rationale comment as `_anthropic_factory`.
+- M3.7 — New `app/agents/tools/` subpackage with `rag_search.py`. See
+  `app/agents/tools/agent.md` for the full per-module rundown. Summary:
+  `@tool`-decorated async function over the pgvector `Chunk.embedding`
+  ORM comparator (`cosine_distance`); embeds the query via
+  `app.ingestion.embedder.embed_texts`; returns `list[RagHit]` with
+  `text / document_id / chunk_id / ord / score` (score = 1 - distance,
+  higher better). Two unit tests (early-exit paths) + one live
+  integration test (skipped without `OPENAI_API_KEY`).
 
 ## Next Steps
 

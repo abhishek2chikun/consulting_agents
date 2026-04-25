@@ -41,6 +41,8 @@ app/
     settings.py
   agents/        # LLM provider registry + chat model factory (see app/agents/agent.md)
     llm.py
+  ingestion/     # PDF parsing + chunking + embedding pipeline (see app/ingestion/agent.md)
+    docling_parser.py
 ```
 
 ### Corresponding Tests

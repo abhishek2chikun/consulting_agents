@@ -1,11 +1,12 @@
 # app.schemas — agent.md
 
 ## Status
-**Active (M2.6).** Two modules landed: `settings.py` (Settings REST API
-DTOs) and `ping.py` (`/ping` request/response DTOs). Future milestones
-add per-domain schema modules (runs, documents, exports, ...) following
-the same pattern: one module per API surface, named after the router it
-backs.
+**Active (M3.3).** Four modules landed: `settings.py` (Settings REST
+API DTOs), `ping.py` (`/ping` request/response DTOs), `tasks.py`
+(`/tasks` catalog DTO), and `documents.py` (`/documents` response DTO).
+Future milestones add per-domain schema modules (runs, exports, ...)
+following the same pattern: one module per API surface, named after
+the router it backs.
 
 ---
 
@@ -30,6 +31,8 @@ app/schemas/
   __init__.py        # package marker (no re-exports yet)
   settings.py        # Settings API DTOs (M2.4)
   ping.py            # /ping request/response DTOs (M2.6)
+  tasks.py           # /tasks catalog DTO (M3.1)
+  documents.py       # /documents response DTO (M3.3)
 ```
 
 ### Corresponding Tests
@@ -63,6 +66,14 @@ from app.schemas.settings import (
 from app.schemas.ping import (
     PingRequest,                 # {prompt: str (1..10_000), role: str = "framing"}
     PingResponse,                # {response: str, model: str, provider: str}
+)
+
+from app.schemas.tasks import (
+    TaskTypeInfo,                # {slug, name, description, enabled} — bare list response
+)
+
+from app.schemas.documents import (
+    DocumentInfo,                # {id, filename, mime, size, status, error, created_at, updated_at}
 )
 ```
 
@@ -107,6 +118,17 @@ None.
   (`response`, `model`, `provider`). The 10 000-char prompt ceiling is
   a defensive guardrail since `/ping` isn't meant to carry full agent
   prompts.
+- M3.1 — `tasks.py` adds `TaskTypeInfo` (`slug`, `name`, optional
+  `description`, `enabled`). The `/tasks` endpoint returns a bare
+  `list[TaskTypeInfo]` rather than a `{tasks: [...]}` envelope to
+  match the spec's literal response shape; consumers iterate directly.
+- M3.3 — `documents.py` adds `DocumentInfo` (`id`, `filename`, `mime`,
+  `size`, `status`, optional `error`, `created_at`, `updated_at`).
+  `from_attributes=True` so the route handler can call
+  `DocumentInfo.model_validate(doc)` directly on a `Document` ORM
+  instance. `status` is serialised as the enum's string value (not a
+  `Literal[...]`); the canonical enum lives in `app.models.document`
+  and we don't keep a parallel copy here.
 
 ## Next Steps
 

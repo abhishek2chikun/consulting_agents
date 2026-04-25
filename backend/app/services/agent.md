@@ -1,11 +1,14 @@
 # app.services — agent.md
 
 ## Status
-**Active (M2.4).** `SettingsService` owns encrypted provider-API-key
+**Active (M3.3).** `SettingsService` owns encrypted provider-API-key
 storage AND the JSON KV settings (model overrides, search provider,
-max stage retries) used by the M2.4 REST API. Future milestones add
-`DocumentService`, `RunService`, `FramingService`, etc. — all following
-the same shape (explicit `AsyncSession` injection, async methods).
+max stage retries) used by the M2.4 REST API. `DocumentService` (M3.3)
+owns the upload-on-disk + Document row lifecycle for the
+`/documents` API; ingestion (parse → embed → ready/failed) lands in
+M3.4+. Future milestones add `RunService`, `FramingService`, etc. — all
+following the same shape (explicit `AsyncSession` injection, async
+methods).
 
 ---
 
@@ -35,6 +38,7 @@ silently routing through whatever `user_id` callers happen to pass.
 app/services/
   __init__.py            # package marker (no re-exports yet)
   settings_service.py    # SettingsService — provider keys + JSON KV settings
+  document_service.py    # DocumentService — upload binary + Document row lifecycle (M3.3)
 ```
 
 ### Corresponding Tests
@@ -46,6 +50,9 @@ backend/tests/integration/test_settings_service.py
 backend/tests/integration/test_settings_api.py
   # End-to-end coverage of get_setting / set_setting / list_provider_keys /
   # get_settings_snapshot via the REST API.
+backend/tests/integration/test_documents_api.py
+  # End-to-end coverage of DocumentService via the REST API
+  # (upload writes file + creates pending row, list, delete, 404, empty-file 400).
 ```
 
 ---
@@ -87,6 +94,25 @@ from app.services.settings_service import (
 #       search_provider=None, max_stage_retries=DEFAULT_MAX_STAGE_RETRIES).
 ```
 
+```python
+from app.services.document_service import DocumentService
+
+# DocumentService — single-user document upload lifecycle (M3.3).
+#   __init__(session: AsyncSession)
+#
+#   async create_document(*, filename: str, mime: str, content: bytes) -> Document
+#       Inserts a Document row with status=pending, flushes to populate
+#       id, writes content to {Settings.upload_dir}/{id}, then commits.
+#       File-write failure rolls back the in-flight row (no orphan).
+#   async list_documents() -> list[Document]
+#       Returns SINGLETON_USER_ID's documents ordered by created_at desc.
+#   async get_document(doc_id: uuid.UUID) -> Document | None
+#       Single-row lookup by primary key.
+#   async delete_document(doc_id: uuid.UUID) -> bool
+#       Deletes the row + commits, then unlinks the on-disk file
+#       (missing_ok=True). Returns False if the row didn't exist.
+```
+
 ---
 
 ## Dependencies
@@ -96,23 +122,31 @@ from app.services.settings_service import (
 | `sqlalchemy` | `select` |
 | `sqlalchemy.dialects.postgresql` | `insert` (for `ON CONFLICT DO UPDATE`) |
 | `sqlalchemy.ext.asyncio` | `AsyncSession` |
-| `app.core` | `crypto.wrap` / `crypto.unwrap` |
-| `app.models` | `ProviderKey`, `SettingKV`, `SINGLETON_USER_ID` |
+| `app.core` | `crypto.wrap` / `crypto.unwrap`, `config.get_settings` (DocumentService reads `upload_dir`) |
+| `app.models` | `ProviderKey`, `SettingKV`, `Document`, `DocumentStatus`, `SINGLETON_USER_ID` |
 
 | Consumed by | What |
 |---|---|
 | `tests/integration/test_settings_service.py` | encrypted-at-rest + upsert coverage |
 | `tests/integration/test_settings_api.py` | exercised via the M2.4 REST API |
+| `tests/integration/test_documents_api.py` | exercises DocumentService via the M3.3 REST API |
 | `app.api.settings` (M2.4) | route handlers instantiate per-request |
+| `app.api.documents` (M3.3) | route handlers instantiate per-request |
 | Future agent LLM client (M2.5) | retrieves provider keys before invoking models |
 
 ---
 
 ## Config
 
-None at this layer. Crypto key is read by `app.core.crypto` from
+`SettingsService`: none. Crypto key is read by `app.core.crypto` from
 `Settings.fernet_key` on every wrap/unwrap call. The DB session is
 injected by the caller — no service-side connection management.
+
+`DocumentService`: reads `Settings.upload_dir` (env: `UPLOAD_DIR`,
+default `Path("data/uploads")`) on every call via `get_settings()`.
+Resolved relative to the process working directory (typically the
+repo root when uvicorn is launched via the project Makefile). The
+service ensures the directory exists before writing.
 
 ---
 
@@ -130,6 +164,13 @@ injected by the caller — no service-side connection management.
   perplexity) and `DEFAULT_MAX_STAGE_RETRIES = 2`. KV writes follow the
   same commit-inside semantics as `set_provider_key`. End-to-end
   coverage via `tests/integration/test_settings_api.py` (14 tests).
+- M3.3 — `DocumentService` lands. Manages the upload-on-disk + DB row
+  lifecycle for `/documents`. Ordering on create: insert → flush →
+  write file → commit (file failure rolls back; no orphan row).
+  Ordering on delete: delete row → commit → unlink file
+  (`missing_ok=True`) — the DB is the source of truth, so a stranded
+  file is acceptable; an orphaned row is not. End-to-end coverage via
+  `tests/integration/test_documents_api.py` (5 tests).
 
 ## Next Steps
 
@@ -137,7 +178,10 @@ injected by the caller — no service-side connection management.
    per-provider clients; that's where the per-provider model whitelist
    will live (intentionally not in this service).
 2. Add `delete_provider_key` when the "remove key" UX needs it.
-3. Add `DocumentService`, `RunService`, `FramingService` per the V1 plan.
+3. M3.4+ — extend `DocumentService` with state-transition helpers
+   (`mark_parsing` / `mark_embedding` / `mark_ready` / `mark_failed`)
+   driven by the ingestion pipeline.
+4. Add `RunService`, `FramingService` per the V1 plan.
 
 ## Known Issues / Blockers
 

@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.documents import router as documents_router
 from app.api.ping import router as ping_router
 from app.api.settings import router as settings_router
+from app.api.tasks import router as tasks_router
 from app.core.config import get_settings
 
 # V1 is single-user local dev: the Next.js frontend runs on
@@ -26,7 +28,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=list(ALLOWED_ORIGINS),
         allow_credentials=False,
-        allow_methods=["GET", "PUT", "POST", "OPTIONS"],
+        allow_methods=["GET", "PUT", "POST", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type"],
     )
 
@@ -36,6 +38,8 @@ def create_app() -> FastAPI:
 
     app.include_router(settings_router)
     app.include_router(ping_router)
+    app.include_router(tasks_router)
+    app.include_router(documents_router)
 
     return app
 

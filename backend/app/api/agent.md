@@ -1,9 +1,10 @@
 # app.api — agent.md
 
 ## Status
-**Active (M2.6).** Two routers landed: `settings.py` (mounted at
-`/settings`) and `ping.py` (mounted at `/ping`). Future milestones add
-`runs.py`, `documents.py`, `websocket.py`, etc. — each module exposes a
+**Active (M3.3).** Four routers landed: `settings.py` (mounted at
+`/settings`), `ping.py` (mounted at `/ping`), `tasks.py` (mounted at
+`/tasks`), and `documents.py` (mounted at `/documents`). Future
+milestones add `runs.py`, `websocket.py`, etc. — each module exposes a
 single `router = APIRouter(...)` that `app.main.create_app` mounts via
 `include_router`.
 
@@ -38,6 +39,8 @@ app/api/
   __init__.py        # package marker (no re-exports yet)
   settings.py        # Settings router — /settings + subpaths (M2.4)
   ping.py            # Ping router — POST /ping (M2.6)
+  tasks.py           # Tasks catalog router — GET /tasks (M3.1)
+  documents.py       # Documents router — POST/GET/DELETE /documents (M3.3)
 ```
 
 ### Corresponding Tests
@@ -62,6 +65,17 @@ backend/tests/integration/test_ping.py
   test_ping_501_when_aws
   test_ping_uses_role_param
   test_ping_default_role_is_framing
+
+backend/tests/integration/test_tasks_catalog.py
+  test_get_tasks_returns_seeded_catalog
+  test_get_tasks_is_sorted_by_slug
+
+backend/tests/integration/test_documents_api.py
+  test_upload_document_creates_pending_row_and_writes_file
+  test_list_documents_returns_uploaded
+  test_delete_document_removes_row_and_file
+  test_delete_nonexistent_returns_404
+  test_upload_empty_file_returns_400
 ```
 
 ---
@@ -71,6 +85,8 @@ backend/tests/integration/test_ping.py
 ```python
 from app.api.settings import router as settings_router
 from app.api.ping import router as ping_router
+from app.api.tasks import router as tasks_router
+from app.api.documents import router as documents_router
 
 # Routes (mounted by app.main.create_app):
 #   GET    /settings/providers          -> ProvidersResponse
@@ -80,6 +96,10 @@ from app.api.ping import router as ping_router
 #   PUT    /settings/max_stage_retries       body: MaxStageRetriesRequest   -> 204
 #   GET    /settings                    -> SettingsSnapshot
 #   POST   /ping                              body: PingRequest              -> PingResponse
+#   GET    /tasks                       -> list[TaskTypeInfo]
+#   POST   /documents                         multipart: file=UploadFile    -> 201 DocumentInfo
+#   GET    /documents                   -> list[DocumentInfo]
+#   DELETE /documents/{doc_id}                                              -> 204
 ```
 
 GET endpoints expose only `has_key: bool` flags for provider keys; raw
@@ -92,6 +112,13 @@ and returns the echoed prompt + model + provider labels. Error
 mapping: `ValueError` (missing key / unknown provider) -> `400`,
 `NotImplementedError` (AWS Bedrock deferral) -> `501`.
 
+`/tasks` returns the consulting task-type catalog — a bare list (no
+envelope wrapper) ordered by slug, so the frontend can iterate
+directly. The endpoint is read-only; rows are seeded by migration
+`0004_task_catalog` and not user-mutable in V1. The bare-list shape
+matches the M3.1 spec test exactly; deviating to a `{tasks: [...]}`
+envelope would have introduced a needless contract delta.
+
 ---
 
 ## Dependencies
@@ -103,7 +130,11 @@ mapping: `ValueError` (missing key / unknown provider) -> `400`,
 | `app.core.db` | `get_session` (DI) |
 | `app.schemas.settings` | request / response DTOs |
 | `app.schemas.ping` | `PingRequest`, `PingResponse` |
+| `app.schemas.tasks` | `TaskTypeInfo` |
+| `app.schemas.documents` | `DocumentInfo` |
 | `app.services.settings_service` | `SettingsService`, `KNOWN_PROVIDERS` |
+| `app.services.document_service` | `DocumentService` |
+| `app.models` | `TaskType` (for `/tasks`) |
 | `app.agents.llm` | `get_chat_model`, `provider_name_for` (for `/ping`) |
 | `langchain_core.messages` | `HumanMessage` (for `/ping` invocation) |
 
@@ -137,12 +168,44 @@ through `app.core.db` and `app.services.settings_service`.
   via `monkeypatch.setattr(app.api.ping, "get_chat_model", ...)`. Live
   smoke (no key configured) returns the expected 400 with the
   `"No API key configured for provider 'anthropic'"` detail.
+- M3.1 — `tasks.py` router mounted at `/tasks`. `GET /tasks` reads the
+  seeded `task_types` table and returns a bare `list[TaskTypeInfo]`
+  ordered by slug. Two integration tests in `test_tasks_catalog.py`
+  pin the seeded rows (`market_entry` enabled, `ma` disabled) and the
+  sort order. Live smoke against uvicorn returns the expected JSON
+  array of two task types.
+- M3.3 — `documents.py` router mounted at `/documents`. `POST /documents`
+  accepts a multipart `file=UploadFile`, creates a `pending` Document
+  row, writes the raw bytes to `{UPLOAD_DIR}/{doc_id}`, and returns
+  201 with the `DocumentInfo`. `GET /documents` returns the singleton
+  user's documents (newest first). `DELETE /documents/{doc_id}`
+  removes the row + on-disk file (204 / 404). Empty filename or
+  zero-byte body → 400. CORS `allow_methods` extended to include
+  `DELETE`. Five integration tests in `test_documents_api.py` cover
+  all success + error paths against tmp `UPLOAD_DIR`. Live smoke
+  against uvicorn round-trips a text file end-to-end. New runtime
+  dep: `python-multipart` (FastAPI requires it for multipart parsing).
+- M3.6 — `POST /documents` now schedules the ingest pipeline as a
+  background `asyncio.Task` after the row is created. The task is
+  registered in `app.core.task_registry.TASK_REGISTRY` under the key
+  `f"ingest:{doc.id}"` so a future cancel endpoint can find it. The
+  201 response shape is unchanged: `status` is still `pending` at the
+  moment the response is built; the worker transitions it to
+  `parsing → embedding → ready` (or `failed`) afterwards. Existing
+  M3.3 tests continue to pass because they only assert the immediate
+  201 body; the new `tests/integration/conftest.py` autouse fixture
+  drains any leaked `ingest:*` tasks at end of test so background
+  failures (no OpenAI key configured in those tests) don't bleed
+  into the next case.
 
 ## Next Steps
 
 1. M3 — `runs.py` for run creation / status / cancel.
 2. M4 — websocket router for live stage updates.
-3. Add a module-level `api_router = APIRouter()` aggregator if the set
+3. Add a `DELETE /documents/{id}/cancel` (or repurpose existing
+   DELETE) once ingestion is async — the V1 plan currently treats
+   delete-during-ingest as out of scope.
+4. Add a module-level `api_router = APIRouter()` aggregator if the set
    of subroutes grows beyond easy hand-mounting in `app.main`.
 
 ## Known Issues / Blockers
