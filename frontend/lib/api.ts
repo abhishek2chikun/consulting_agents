@@ -25,6 +25,7 @@
  */
 
 import type {
+  ArtifactContentResponse,
   CreateRunResponse,
   ModelOverridesMap,
   PingResponse,
@@ -176,3 +177,11 @@ export const cancelRun = (runId: string): Promise<void> =>
   request<void>(`/runs/${runId}/cancel`, {
     method: "POST",
   });
+
+export const getRunArtifact = (
+  runId: string,
+  artifactPath: string,
+): Promise<ArtifactContentResponse> =>
+  request<ArtifactContentResponse>(
+    `/runs/${runId}/artifacts/${artifactPath}`,
+  );

@@ -3,14 +3,24 @@
 import { useMemo } from "react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useEventStream } from "@/lib/sse";
+import { useEventStream, type RunEvent } from "@/lib/sse";
 
 interface ChatStreamProps {
   runId: string;
+  /**
+   * Optionally pass externally-managed events (e.g. when the parent
+   * page already subscribes to the SSE stream and wants to avoid
+   * opening a second connection). When provided, `useEventStream`
+   * inside this component is skipped.
+   */
+  events?: RunEvent[];
+  status?: "idle" | "connecting" | "open" | "closed";
 }
 
-export function ChatStream({ runId }: ChatStreamProps) {
-  const { events, status } = useEventStream(runId);
+export function ChatStream({ runId, events: externalEvents, status: externalStatus }: ChatStreamProps) {
+  const internal = useEventStream(externalEvents === undefined ? runId : null);
+  const events = externalEvents ?? internal.events;
+  const status = externalStatus ?? internal.status;
 
   const statusLabel = useMemo(() => {
     if (status === "open") return "live";

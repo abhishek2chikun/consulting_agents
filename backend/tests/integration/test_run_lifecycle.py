@@ -1,4 +1,10 @@
-"""Integration tests for run lifecycle APIs (M5.5)."""
+"""Integration tests for run lifecycle APIs (M5.5 + M6.11).
+
+The worker now drives the full LangGraph pipeline (framing → stages →
+synthesis → audit) instead of writing a hard-coded questionnaire, so we
+override `get_run_model_factory` with a `FakeChatModel`-backed factory
+to keep the test self-contained (no API keys, no network).
+"""
 
 from __future__ import annotations
 
@@ -11,17 +17,130 @@ import httpx
 import pytest
 from sqlalchemy import delete, select
 
+from app.api.runs import get_run_model_factory
 from app.core.db import AsyncSessionLocal
 from app.main import create_app
 from app.models import Artifact, Message, Run, RunStatus
+from app.testing.fake_chat_model import FakeChatModel
+from app.workers.run_worker import ModelFactory
+
+
+def _stage_payload(stage_slug: str, src_id: str) -> dict:
+    return {
+        "artifacts": [
+            {
+                "path": f"{stage_slug}/findings.md",
+                "content": f"{stage_slug} finding [^{src_id}].",
+                "kind": "markdown",
+            }
+        ],
+        "evidence": [
+            {
+                "src_id": src_id,
+                "title": f"{stage_slug} source",
+                "url": f"https://example.com/{src_id}",
+                "snippet": "snippet",
+                "kind": "web",
+                "provider": "tavily",
+            }
+        ],
+        "summary": f"{stage_slug} summary",
+    }
+
+
+def _gate(stage: str, verdict: str) -> dict:
+    return {
+        "verdict": verdict,
+        "stage": stage,
+        "attempt": 1,
+        "gaps": [],
+        "target_agents": [],
+        "rationale": "ok",
+    }
+
+
+def _fresh_factory() -> ModelFactory:
+    """Return a fresh per-role factory; each call to the dep gives new queues.
+
+    The lifecycle test creates two runs (one per test), and FastAPI
+    resolves the dependency once per request — so we need a factory
+    that hands out new `FakeChatModel`s populated with enough scripted
+    responses for one full run.
+    """
+
+    framing_response = {
+        "brief": {
+            "objective": "Plan",
+            "target_market": "EU",
+            "constraints": [],
+            "questionnaire_answers": {},
+        },
+        "questionnaire": {
+            "items": [
+                {
+                    "id": "time_horizon",
+                    "label": "Time horizon",
+                    "type": "text",
+                    "required": True,
+                }
+            ]
+        },
+    }
+
+    framing_model = FakeChatModel(structured_responses=[framing_response])
+    research_model = FakeChatModel(
+        structured_responses=[
+            _stage_payload("stage1_foundation", "s1"),
+            _stage_payload("stage2_competitive", "s2"),
+            _stage_payload("stage3_risk", "s3"),
+        ]
+    )
+    reviewer_model = FakeChatModel(
+        structured_responses=[
+            _gate("stage1_foundation", "advance"),
+            _gate("stage2_competitive", "advance"),
+            _gate("stage3_risk", "advance"),
+        ]
+    )
+    synthesis_model = FakeChatModel(
+        responses=[
+            "# Final Report\n\n## Executive Summary\n- s1 [^s1] s2 [^s2] s3 [^s3].\n"
+        ]
+    )
+    audit_model = FakeChatModel(
+        responses=[
+            "## Weak Claims\n- none\n## Contradictions\n- none\n## Residual Gaps\n- none\n"
+        ]
+    )
+
+    cache: dict[str, FakeChatModel] = {
+        "framing": framing_model,
+        "research": research_model,
+        "reviewer": reviewer_model,
+        "synthesis": synthesis_model,
+        "audit": audit_model,
+    }
+
+    def factory(role: str) -> object:
+        return cache[role]
+
+    return factory
 
 
 @pytest.fixture
 async def client() -> AsyncIterator[httpx.AsyncClient]:
     app = create_app()
+
+    async def _override() -> ModelFactory:
+        return _fresh_factory()
+
+    app.dependency_overrides[get_run_model_factory] = _override
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+
+    app.dependency_overrides.clear()
 
 
 async def _cleanup_run(run_id: uuid.UUID) -> None:
@@ -30,7 +149,7 @@ async def _cleanup_run(run_id: uuid.UUID) -> None:
         await session.commit()
 
 
-async def _read_one_sse_event(response: httpx.Response, timeout: float = 3.0) -> dict[str, object]:
+async def _read_one_sse_event(response: httpx.Response, timeout: float = 5.0) -> dict[str, object]:
     event_id: int | None = None
     data: str | None = None
     line_iter = response.aiter_lines()
@@ -63,7 +182,7 @@ async def _wait_for_artifact_path(
     client: httpx.AsyncClient,
     run_id: uuid.UUID,
     path: str,
-    timeout: float = 3.0,
+    timeout: float = 5.0,
 ) -> None:
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
@@ -74,23 +193,19 @@ async def _wait_for_artifact_path(
     raise AssertionError(f"Artifact {path!r} not ready within {timeout}s")
 
 
-async def _wait_for_message_count(
+async def _wait_for_run_status(
     run_id: uuid.UUID,
-    expected_at_least: int,
-    timeout: float = 3.0,
+    expected: RunStatus,
+    timeout: float = 10.0,
 ) -> None:
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         async with AsyncSessionLocal() as session:
-            messages = (
-                await session.execute(select(Message).where(Message.run_id == run_id))
-            ).scalars()
-            if len(list(messages)) >= expected_at_least:
+            run = await session.get(Run, run_id)
+            if run is not None and run.status == expected:
                 return
         await asyncio.sleep(0.1)
-    raise AssertionError(
-        f"Message count for run {run_id} did not reach {expected_at_least} within {timeout}s"
-    )
+    raise AssertionError(f"Run {run_id} did not reach status {expected!r} within {timeout}s")
 
 
 @pytest.mark.asyncio
@@ -131,7 +246,9 @@ async def test_post_runs_creates_questioning_run_and_emits_questionnaire_event(
 
 
 @pytest.mark.asyncio
-async def test_answers_and_artifact_fetch_roundtrip(client: httpx.AsyncClient) -> None:
+async def test_answers_drive_full_pipeline_and_persist_artifacts(
+    client: httpx.AsyncClient,
+) -> None:
     create = await client.post(
         "/runs",
         json={
@@ -151,7 +268,9 @@ async def test_answers_and_artifact_fetch_roundtrip(client: httpx.AsyncClient) -
             json={"answers": {"time_horizon": "12 months", "budget": "medium"}},
         )
         assert submit.status_code == 204, submit.text
-        await _wait_for_message_count(run_id, 1)
+
+        # Worker now drives the full pipeline; wait for completion.
+        await _wait_for_run_status(run_id, RunStatus.completed)
 
         artifact = await client.get(f"/runs/{run_id}/artifacts/framing/questionnaire.json")
         assert artifact.status_code == 200
@@ -163,18 +282,23 @@ async def test_answers_and_artifact_fetch_roundtrip(client: httpx.AsyncClient) -
         assert "items" in content
 
         async with AsyncSessionLocal() as session:
-            run = await session.get(Run, run_id)
-            assert run is not None
-            assert run.status == RunStatus.running
-
             messages = (
                 await session.execute(select(Message).where(Message.run_id == run_id))
-            ).scalars()
-            assert len(list(messages)) == 1
+            ).scalars().all()
+            assert len(messages) == 1
 
-            artifacts = (
-                await session.execute(select(Artifact).where(Artifact.run_id == run_id))
-            ).scalars()
-            assert len(list(artifacts)) >= 1
+            artifact_paths = {
+                a.path
+                for a in (
+                    await session.execute(
+                        select(Artifact).where(Artifact.run_id == run_id)
+                    )
+                ).scalars().all()
+            }
+        assert "stage1_foundation/findings.md" in artifact_paths
+        assert "stage2_competitive/findings.md" in artifact_paths
+        assert "stage3_risk/findings.md" in artifact_paths
+        assert "final_report.md" in artifact_paths
+        assert "audit.md" in artifact_paths
     finally:
         await _cleanup_run(run_id)
