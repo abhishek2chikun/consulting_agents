@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Consulting Research Agent",
-  description: "Open-source consulting research agent — Market Entry vertical (V1)",
+  description: "Consulting research workspace for market entry, pricing, profitability, and M&A runs.",
 };
 
 export default function RootLayout({
