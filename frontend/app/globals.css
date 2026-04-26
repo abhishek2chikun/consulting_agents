@@ -123,6 +123,10 @@
   }
   body {
     @apply bg-background text-foreground;
+    background:
+      linear-gradient(135deg, oklch(0.94 0.025 210 / 0.7), transparent 34%),
+      linear-gradient(315deg, oklch(0.95 0.028 80 / 0.5), transparent 32%),
+      linear-gradient(180deg, oklch(0.985 0.006 210), oklch(0.965 0.006 250));
   }
   html {
     @apply font-sans;

@@ -20,7 +20,7 @@ If port 3000 is taken: `pnpm exec next start -p 3100` (or `pnpm dev -p 3100`).
 
 ## Project overview
 
-Single-page-ish web app where a consultant picks a task, fills a brief / answers a clarifying questionnaire, kicks off an agent run, and watches a live trace + final report stream in. Backend (FastAPI + LangGraph + DeepAgents) does all the heavy lifting; frontend is presentation, control, and SSE consumer.
+Single-page-ish web app where a consultant picks a task, uploads optional context documents, fills a brief / answers a clarifying questionnaire, kicks off an agent run, and watches a live trace + final report stream in. Backend (FastAPI + LangGraph + DeepAgents) does all the heavy lifting; frontend is presentation, control, and SSE consumer.
 
 ## Directory structure
 
@@ -28,7 +28,7 @@ Single-page-ish web app where a consultant picks a task, fills a brief / answers
 frontend/
   app/
     layout.tsx           # Root layout (Geist fonts, globals.css, <Toaster/>)
-    page.tsx             # Landing page (placeholder this milestone)
+    page.tsx             # New-run console: task picker, document upload, brief composer
     globals.css          # Tailwind v4 + shadcn theme tokens
     favicon.ico
     settings/
@@ -58,7 +58,7 @@ frontend/
 | Path                          | Status              | Purpose                                               |
 | ----------------------------- | ------------------- | ----------------------------------------------------- |
 | `app/layout.tsx`              | Boilerplate + Toaster | Root HTML + font + globals + sonner mount           |
-| `app/page.tsx`                | Placeholder (M1.2)  | Will become task-picker landing                       |
+| `app/page.tsx`                | Active              | New-run console: task picker, context documents, brief |
 | `app/settings/page.tsx`       | Active (M2.7)       | Provider keys, model overrides, search, retry config  |
 | `app/runs/[id]/page.tsx`      | Planned (M5.7)      | Run view (live trace + report)                        |
 | `components/ui/button.tsx`    | Boilerplate         | shadcn Button                                         |
@@ -77,8 +77,8 @@ frontend/
 | `components/UsagePanel.tsx`   | Planned (M7.5)      | Token / cost usage display                            |
 | `components/QuestionnaireForm.tsx` | Planned (M6.3) | Clarifying-questions form                            |
 | `lib/utils.ts`                | Boilerplate         | shadcn `cn()` helper                                  |
-| `lib/api.ts`                  | Active (M2.7)       | Typed REST client for FastAPI backend                 |
-| `lib/types.ts`                | Active (M2.7)       | DTO mirrors of backend Pydantic schemas               |
+| `lib/api.ts`                  | Active              | Typed REST client for FastAPI backend                 |
+| `lib/types.ts`                | Active              | DTO mirrors of backend Pydantic schemas               |
 | `lib/sse.ts`                  | Planned (M5.7)      | SSE consumption helper                                |
 
 ## Conventions
@@ -89,6 +89,8 @@ frontend/
 - pnpm for package management
 - Server components by default; add `"use client"` only when needed (state, effects, browser APIs)
 - API access goes through `lib/api.ts`, never inline `fetch` in components
+- Document upload uses `POST /documents` with `FormData`; do not set a JSON `Content-Type` for that request
+- New runs pass uploaded context via `/runs` `document_ids`; keep upload/list/delete DTOs mirrored in `lib/types.ts`
 - SSE consumption goes through `lib/sse.ts` (planned M5.7)
 - Path alias: `@/*` → repo `frontend/` root
 - No per-component `agent.md` files — this single file is the registry
@@ -114,6 +116,7 @@ curl -s http://localhost:3000 | grep "Consulting Research Agent"
 - **M1.2 ✅** — Next.js 16 + Tailwind v4 + shadcn scaffold, placeholder landing page with build-info card. Lint/typecheck/build all clean. Heading verified in rendered HTML.
 - **M2.7 ✅** — Settings UI at `/settings` (4 sections: LLM provider keys with `has_key` badges, per-role model overrides with Test-connection ping, search-provider radio + per-key inputs, max stage retries 1..5). New `lib/api.ts` (typed fetch wrapper + `ApiRequestError`) and `lib/types.ts` (DTO mirrors of `backend/app/schemas/{settings,ping}.py`). Backend: CORS middleware allowing `http://localhost:3000` (V1 single-user local dev). shadcn additions: label, select, radio-group, separator, badge. Sonner `<Toaster />` mounted in `app/layout.tsx`. Smoke-verified: `PUT /settings/providers/anthropic` flips `has_key` to true, `PUT /settings/max_stage_retries` with `99` returns 422, full settings snapshot persists.
 - **M4.7 ✅ (partial UI target)** — Search section now includes a **Test search** button calling backend `GET /health/search?q=test`, with toast output of top titles. Added `testSearchProvider()` in `lib/api.ts` and `SearchHealthResponse` type in `lib/types.ts`. This validates provider selection + key wiring without requiring a full agent run.
+- **New-run UI ✅** — `/` is now a minimalist operator console with consulting-type cards loaded from `GET /tasks` (local fallback catalog if the backend is unavailable), task-aware example briefs, immediate context-document upload via `POST /documents`, remove support via `DELETE /documents/{id}`, and `/runs` creation using the selected `task_type` plus uploaded `document_ids`.
 
 ## Deferred work
 

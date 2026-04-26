@@ -27,6 +27,7 @@
 import type {
   ArtifactContentResponse,
   CreateRunResponse,
+  DocumentInfo,
   EvidenceListResponse,
   ModelOverridesMap,
   PingResponse,
@@ -36,6 +37,7 @@ import type {
   SearchHealthResponse,
   SearchProviderName,
   SettingsSnapshot,
+  TaskTypeInfo,
 } from "./types";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -151,6 +153,41 @@ export const pingLLM = (role: string, prompt = "ping"): Promise<PingResponse> =>
 
 export const testSearchProvider = (query = "test"): Promise<SearchHealthResponse> =>
   request<SearchHealthResponse>(`/health/search?q=${encodeURIComponent(query)}`);
+
+export const getTasks = (): Promise<TaskTypeInfo[]> => request<TaskTypeInfo[]>("/tasks");
+
+export const uploadDocument = async (file: File): Promise<DocumentInfo> => {
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetch(`${BASE_URL}/documents`, {
+    method: "POST",
+    body: form,
+  });
+
+  if (!res.ok) {
+    let detail: string;
+    try {
+      const body = (await res.json()) as { detail?: unknown };
+      detail =
+        typeof body.detail === "string"
+          ? body.detail
+          : body.detail !== undefined
+            ? JSON.stringify(body.detail)
+            : `${res.status} ${res.statusText}`;
+    } catch {
+      detail = `${res.status} ${res.statusText}`;
+    }
+    throw new ApiRequestError(res.status, detail);
+  }
+
+  return (await res.json()) as DocumentInfo;
+};
+
+export const deleteDocument = (documentId: string): Promise<void> =>
+  request<void>(`/documents/${documentId}`, {
+    method: "DELETE",
+  });
 
 export const createRun = (body: {
   task_type: string;

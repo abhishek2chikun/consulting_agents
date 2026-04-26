@@ -103,6 +103,24 @@ export interface RunInfoResponse {
   artifact_paths: string[];
 }
 
+export interface TaskTypeInfo {
+  slug: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+}
+
+export interface DocumentInfo {
+  id: string;
+  filename: string;
+  mime: string;
+  size: number;
+  status: string;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ArtifactContentResponse {
   path: string;
   kind: string;
