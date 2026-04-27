@@ -75,9 +75,7 @@ def build_synthesis_node(
             )
 
         known = {r.src_id for r in evidence_rows}
-        allowlist_block = (
-            ", ".join(f"[^{sid}]" for sid in sorted(known)) if known else "(none)"
-        )
+        allowlist_block = ", ".join(f"[^{sid}]" for sid in sorted(known)) if known else "(none)"
 
         base_user_msg = (
             f"framing: {framing}\n\n"
@@ -98,8 +96,7 @@ def build_synthesis_node(
                 user_msg = base_user_msg
             else:
                 user_msg = (
-                    base_user_msg
-                    + "\n\n---\nPREVIOUS DRAFT REJECTED.\n"
+                    base_user_msg + "\n\n---\nPREVIOUS DRAFT REJECTED.\n"
                     f"These citation tokens are not in the allowed list and must be "
                     f"removed or replaced: {sorted(unknown)}.\n"
                     "Re-emit the FULL Markdown report. Use ONLY tokens from the "
