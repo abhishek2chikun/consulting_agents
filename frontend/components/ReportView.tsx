@@ -1,26 +1,8 @@
 "use client";
 
-/**
- * ReportView — renders the final synthesis report (M7.3).
- *
- * V1 deliberately hand-rolls a tiny markdown subset (headings,
- * paragraphs, unordered lists, fenced code blocks) instead of pulling
- * in `react-markdown` + a remark plugin chain. The synthesis prompt
- * controls the report shape end-to-end, so we only need to render
- * what we ourselves produce.
- *
- * The interesting bit is the citation chip: `[^src_id]` substrings
- * inside inline text become small clickable buttons that surface the
- * source via `onCitationClick(srcId)` (handled by the parent page,
- * which owns the SourcesSidebar).
- *
- * Loading / empty / error states are handled inline so the parent
- * layout can drop this component into a pane without a wrapper card.
- */
-
 import { useEffect, useState } from "react";
+import { FileText, Loader2 } from "lucide-react";
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ApiRequestError, getRunArtifact } from "@/lib/api";
 import type { RunEvent } from "@/lib/sse";
 
@@ -28,13 +10,7 @@ const REPORT_PATH = "final_report.md";
 
 interface ReportViewProps {
   runId: string;
-  /**
-   * SSE events from the parent page. We watch for an
-   * `artifact_update` whose payload.path === "final_report.md" and
-   * (re)fetch the artifact when it lands.
-   */
   events: RunEvent[];
-  /** Called when a `[^src_id]` chip is clicked. */
   onCitationClick?: (srcId: string) => void;
 }
 
@@ -43,17 +19,10 @@ export function ReportView({ runId, events, onCitationClick }: ReportViewProps) 
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Latest report-update event id is what triggers a refetch. Compute
-  // it once per render so the effect dependency list stays
-  // statically analyzable.
   const reportEventId = latestReportEventId(events);
 
-  // Trigger a fetch whenever a final_report.md artifact_update lands.
-  // We also do an initial fetch on mount in case the report was
-  // already produced before this component subscribed.
   useEffect(() => {
     let cancelled = false;
-
     const fetchReport = async () => {
       setLoading(true);
       try {
@@ -65,7 +34,6 @@ export function ReportView({ runId, events, onCitationClick }: ReportViewProps) 
       } catch (err) {
         if (cancelled) return;
         if (err instanceof ApiRequestError && err.status === 404) {
-          // Report not produced yet — not an error, just empty state.
           setContent(null);
           setError(null);
         } else {
@@ -75,38 +43,47 @@ export function ReportView({ runId, events, onCitationClick }: ReportViewProps) 
         if (!cancelled) setLoading(false);
       }
     };
-
     void fetchReport();
-
     return () => {
       cancelled = true;
     };
   }, [runId, reportEventId]);
 
+  if (loading && content === null) {
+    return (
+      <div className="flex h-40 items-center justify-center gap-2 text-sm text-stone-400">
+        <Loader2 className="size-4 animate-spin" />
+        Loading report…
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-4 text-sm text-rose-300">
+        {error}
+      </div>
+    );
+  }
+
+  if (content === null) {
+    return (
+      <div className="flex h-60 flex-col items-center justify-center gap-2 text-center">
+        <div className="flex size-12 items-center justify-center rounded-full bg-white/[0.04]">
+          <FileText className="size-5 text-stone-500" />
+        </div>
+        <p className="text-sm font-medium text-stone-400">Report pending</p>
+        <p className="max-w-xs text-xs text-stone-500">
+          The final report appears here once synthesis finishes.
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Final report</CardTitle>
-      </CardHeader>
-      <CardContent>
-        {loading && content === null ? (
-          <p className="text-sm text-muted-foreground">Loading report…</p>
-        ) : null}
-        {error ? (
-          <p className="text-sm text-rose-700">{error}</p>
-        ) : null}
-        {content === null && !loading && !error ? (
-          <p className="text-sm text-muted-foreground">
-            The report will appear here once synthesis completes.
-          </p>
-        ) : null}
-        {content !== null ? (
-          <article className="prose prose-sm max-w-none">
-            <MarkdownBody source={content} onCitationClick={onCitationClick} />
-          </article>
-        ) : null}
-      </CardContent>
-    </Card>
+    <article className="report-prose">
+      <MarkdownBody source={content} onCitationClick={onCitationClick} />
+    </article>
   );
 }
 
@@ -121,7 +98,7 @@ function latestReportEventId(events: RunEvent[]): number {
 }
 
 // ---------------------------------------------------------------------------
-// Tiny markdown renderer — block-level
+// Tiny markdown renderer
 // ---------------------------------------------------------------------------
 
 type CitationHandler = (srcId: string) => void;
@@ -162,7 +139,7 @@ function parseBlocks(source: string): Block[] {
         buf.push(peek(i));
         i++;
       }
-      i++; // consume closing fence
+      i++;
       blocks.push({ kind: "code", text: buf.join("\n") });
       continue;
     }
@@ -186,7 +163,6 @@ function parseBlocks(source: string): Block[] {
       i++;
       continue;
     }
-    // Accumulate consecutive non-empty lines into a paragraph.
     const buf: string[] = [];
     while (
       i < lines.length &&
@@ -212,24 +188,41 @@ function RenderBlock({
 }) {
   if (block.kind === "code") {
     return (
-      <pre className="overflow-x-auto rounded bg-slate-100 p-3 text-xs">
+      <pre className="my-4 overflow-x-auto rounded-lg border border-white/5 bg-black/40 p-3 font-mono text-xs text-stone-200">
         <code>{block.text}</code>
       </pre>
     );
   }
   if (block.kind === "heading") {
-    const Tag = `h${block.level}` as "h1" | "h2" | "h3" | "h4";
+    if (block.level === 1)
+      return (
+        <h1 className="mt-2 mb-3 text-2xl font-semibold tracking-tight text-white">
+          <Inline text={block.text} onCitationClick={onCitationClick} />
+        </h1>
+      );
+    if (block.level === 2)
+      return (
+        <h2 className="mt-6 mb-2 border-b border-white/5 pb-2 text-lg font-semibold tracking-tight text-white">
+          <Inline text={block.text} onCitationClick={onCitationClick} />
+        </h2>
+      );
+    if (block.level === 3)
+      return (
+        <h3 className="mt-5 mb-2 text-sm font-semibold tracking-wide text-stone-200 uppercase">
+          <Inline text={block.text} onCitationClick={onCitationClick} />
+        </h3>
+      );
     return (
-      <Tag>
+      <h4 className="mt-4 mb-1.5 text-sm font-semibold text-stone-300">
         <Inline text={block.text} onCitationClick={onCitationClick} />
-      </Tag>
+      </h4>
     );
   }
   if (block.kind === "list") {
     return (
-      <ul>
+      <ul className="my-2 ml-5 list-disc space-y-1 text-sm text-stone-300 marker:text-stone-600">
         {block.items.map((item, i) => (
-          <li key={i}>
+          <li key={i} className="leading-relaxed">
             <Inline text={item} onCitationClick={onCitationClick} />
           </li>
         ))}
@@ -237,7 +230,7 @@ function RenderBlock({
     );
   }
   return (
-    <p>
+    <p className="my-2 text-sm leading-relaxed text-stone-300">
       <Inline text={block.text} onCitationClick={onCitationClick} />
     </p>
   );
@@ -258,27 +251,18 @@ function Inline({
 }) {
   const parts: React.ReactNode[] = [];
   let lastIdx = 0;
-  // Use a per-call regex instance to avoid mutating shared state
-  // (the global flag means `lastIndex` would leak across calls).
   const re = new RegExp(CITATION_RE.source, CITATION_RE.flags);
   let match: RegExpExecArray | null;
-
   while ((match = re.exec(text)) !== null) {
-    if (match.index > lastIdx) {
-      parts.push(text.slice(lastIdx, match.index));
-    }
+    if (match.index > lastIdx) parts.push(text.slice(lastIdx, match.index));
     const srcId = match[1];
     if (srcId === undefined) continue;
-    const chipProps: { srcId: string; onClick?: CitationHandler } = {
-      srcId,
-    };
+    const chipProps: { srcId: string; onClick?: CitationHandler } = { srcId };
     if (onCitationClick) chipProps.onClick = onCitationClick;
     parts.push(<CitationChip key={`${match.index}-${srcId}`} {...chipProps} />);
     lastIdx = match.index + match[0].length;
   }
-  if (lastIdx < text.length) {
-    parts.push(text.slice(lastIdx));
-  }
+  if (lastIdx < text.length) parts.push(text.slice(lastIdx));
   return <>{parts}</>;
 }
 
@@ -289,19 +273,11 @@ function CitationChip({
   srcId: string;
   onClick?: CitationHandler;
 }) {
-  if (!onClick) {
-    return (
-      <span className="mx-0.5 inline-flex items-center rounded bg-sky-100 px-1.5 py-0.5 align-baseline font-mono text-[10px] text-sky-900">
-        {srcId}
-      </span>
-    );
-  }
+  const cls =
+    "mx-0.5 inline-flex items-center rounded-md bg-sky-500/15 px-1.5 py-0 align-baseline font-mono text-[10px] font-medium text-sky-300 ring-1 ring-sky-500/20 transition hover:bg-sky-500/25 hover:text-sky-200";
+  if (!onClick) return <span className={cls}>{srcId}</span>;
   return (
-    <button
-      type="button"
-      onClick={() => onClick(srcId)}
-      className="mx-0.5 inline-flex items-center rounded bg-sky-100 px-1.5 py-0.5 align-baseline font-mono text-[10px] text-sky-900 hover:bg-sky-200"
-    >
+    <button type="button" className={cls + " cursor-pointer"} onClick={() => onClick(srcId)}>
       {srcId}
     </button>
   );

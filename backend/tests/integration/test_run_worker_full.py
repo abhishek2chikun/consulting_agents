@@ -14,6 +14,7 @@ The worker is responsible for:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import AsyncIterator
 
@@ -338,6 +339,67 @@ async def test_continue_after_framing_honors_cooperative_cancel(
         )
     finally:
         await flipper
+
+    async with AsyncSessionLocal() as session:
+        run = await session.get(Run, fresh_run)
+        run_cancelled_events = (
+            (
+                await session.execute(
+                    select(Event).where(
+                        Event.run_id == fresh_run,
+                        Event.type == "run_cancelled",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert run is not None
+    assert run.status == RunStatus.cancelled
+    assert len(run_cancelled_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_continue_after_framing_marks_cancelled_when_task_is_cancelled(
+    fresh_run: uuid.UUID,
+) -> None:
+    """Direct Task.cancel() from the API registry must not leave status stuck."""
+
+    async with AsyncSessionLocal() as session:
+        session.add(
+            Artifact(
+                run_id=fresh_run,
+                path="framing/questionnaire.json",
+                kind="json",
+                content='{"items": []}',
+            )
+        )
+        await session.commit()
+
+    class BlockingStructuredModel:
+        def with_structured_output(self, _schema: object) -> BlockingStructuredModel:
+            return self
+
+        async def ainvoke(self, _messages: object) -> object:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    def factory(_role: str) -> object:
+        return BlockingStructuredModel()
+
+    task = asyncio.create_task(
+        continue_after_framing(
+            fresh_run,
+            answers={"time_horizon": "12 months"},
+            profile=MARKET_ENTRY_PROFILE,
+            model_factory=factory,
+        )
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
     async with AsyncSessionLocal() as session:
         run = await session.get(Run, fresh_run)

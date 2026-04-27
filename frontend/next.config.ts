@@ -1,7 +1,12 @@
 import type { NextConfig } from "next";
 
+const frontendRoot = process.cwd();
+
 const nextConfig: NextConfig = {
-  /* config options here */
+  outputFileTracingRoot: frontendRoot,
+  turbopack: {
+    root: frontendRoot,
+  },
 };
 
 export default nextConfig;

@@ -1,33 +1,11 @@
 "use client";
 
-/**
- * UsagePanel — running token + USD cost totals for a run (M7.5).
- *
- * Reads from the SSE event stream rather than polling: the backend
- * `BudgetTracker` (see `app/agents/budget.py`) emits a
- * `usage_update` event after every LLM call, with absolute totals
- * for the run alongside the per-call delta. We render the latest
- * snapshot.
- *
- * Includes a Cancel button that POSTs to `/runs/{id}/cancel`. The
- * button is disabled when the run is already in a terminal state or
- * the cancel request is in flight; the actual run-status transition
- * is observed via the `run_status` event the parent page already
- * receives.
- */
+import { useMemo } from "react";
 
-import { useMemo, useState } from "react";
-
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { cancelRun } from "@/lib/api";
 import type { RunEvent } from "@/lib/sse";
 
 interface UsagePanelProps {
-  runId: string;
   events: RunEvent[];
-  /** Latest known run status (drives Cancel button enablement). */
-  status?: string | undefined;
 }
 
 interface UsageSnapshot {
@@ -37,8 +15,6 @@ interface UsageSnapshot {
   cost_usd: number;
   model_name?: string;
 }
-
-const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 function latestUsageSnapshot(events: RunEvent[]): UsageSnapshot | null {
   for (let i = events.length - 1; i >= 0; i -= 1) {
@@ -57,75 +33,69 @@ function latestUsageSnapshot(events: RunEvent[]): UsageSnapshot | null {
   return null;
 }
 
-export function UsagePanel({ runId, events, status }: UsagePanelProps) {
-  const [cancelling, setCancelling] = useState(false);
-  const [cancelError, setCancelError] = useState<string | null>(null);
-
+export function UsagePanel({ events }: UsagePanelProps) {
   const snapshot = useMemo(() => latestUsageSnapshot(events), [events]);
-  const terminal = status ? TERMINAL_STATUSES.has(status) : false;
-
-  const handleCancel = async () => {
-    setCancelling(true);
-    setCancelError(null);
-    try {
-      await cancelRun(runId);
-    } catch (err) {
-      setCancelError(err instanceof Error ? err.message : "Cancel failed");
-    } finally {
-      setCancelling(false);
-    }
-  };
 
   return (
-    <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0">
-        <CardTitle className="text-base">Usage</CardTitle>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={handleCancel}
-          disabled={terminal || cancelling || status === "cancelling"}
-        >
-          {cancelling ? "Cancelling…" : "Cancel run"}
-        </Button>
-      </CardHeader>
-      <CardContent>
+    <div className="panel">
+      <div className="panel-header">
+        <span>Usage</span>
+        {snapshot?.model_name && (
+          <span className="max-w-[10rem] truncate font-mono text-[10px] tracking-normal text-stone-500 normal-case">
+            {snapshot.model_name}
+          </span>
+        )}
+      </div>
+      <div className="p-3">
         {snapshot === null ? (
-          <p className="text-sm text-muted-foreground">No usage yet.</p>
+          <p className="text-xs text-stone-500">No usage yet.</p>
         ) : (
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-            <dt className="text-muted-foreground">Input tokens</dt>
-            <dd className="text-right font-mono">
-              {snapshot.input_tokens.toLocaleString()}
-            </dd>
-            <dt className="text-muted-foreground">Output tokens</dt>
-            <dd className="text-right font-mono">
-              {snapshot.output_tokens.toLocaleString()}
-            </dd>
-            <dt className="text-muted-foreground">Total tokens</dt>
-            <dd className="text-right font-mono">
-              {snapshot.total_tokens.toLocaleString()}
-            </dd>
-            <dt className="text-muted-foreground">Cost (USD)</dt>
-            <dd className="text-right font-mono">
-              ${snapshot.cost_usd.toFixed(4)}
-            </dd>
-            {snapshot.model_name && (
-              <>
-                <dt className="text-muted-foreground">Last model</dt>
-                <dd className="truncate text-right font-mono text-xs">
-                  {snapshot.model_name}
-                </dd>
-              </>
-            )}
-          </dl>
+          <div className="space-y-3">
+            {/* Cost — hero */}
+            <div className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
+              <div className="text-[10px] font-semibold tracking-wider text-stone-500 uppercase">
+                Cost
+              </div>
+              <div className="mt-1 font-mono text-2xl font-semibold tracking-tight text-white">
+                ${snapshot.cost_usd.toFixed(4)}
+              </div>
+            </div>
+            {/* Token grid */}
+            <div className="grid grid-cols-3 gap-2">
+              <Stat label="Input" value={snapshot.input_tokens} />
+              <Stat label="Output" value={snapshot.output_tokens} />
+              <Stat label="Total" value={snapshot.total_tokens} accent />
+            </div>
+          </div>
         )}
-        {cancelError && (
-          <p className="mt-2 text-sm text-rose-600 dark:text-rose-400">
-            {cancelError}
-          </p>
-        )}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: number;
+  accent?: boolean;
+}) {
+  return (
+    <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2 text-center">
+      <div className="text-[9px] font-semibold tracking-wider text-stone-500 uppercase">
+        {label}
+      </div>
+      <div
+        className={
+          accent
+            ? "mt-0.5 font-mono text-sm font-semibold text-sky-300"
+            : "mt-0.5 font-mono text-sm font-medium text-stone-200"
+        }
+      >
+        {value.toLocaleString()}
+      </div>
+    </div>
   );
 }

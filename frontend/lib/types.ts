@@ -160,3 +160,44 @@ export interface QuestionnaireItem {
 export interface QuestionnaireSchema {
   items: QuestionnaireItem[];
 }
+
+// ---------------------------------------------------------------------------
+// Agent orchestration graph (node visualization)
+// ---------------------------------------------------------------------------
+
+/** Visual state of an agent node in the orchestration graph. */
+export type AgentNodeState = "idle" | "working" | "completed" | "failed";
+
+/** A single node in the agent orchestration graph. */
+export interface AgentNode {
+  /** Stable identifier — matches the backend agent role (e.g. "framing"). */
+  id: string;
+  /** Human-readable label shown on the node. */
+  label: string;
+  /** Current processing state — drives visual treatment. */
+  state: AgentNodeState;
+  /** Canvas x-coordinate (computed by layout). */
+  x: number;
+  /** Canvas y-coordinate (computed by layout). */
+  y: number;
+}
+
+/** A directed edge connecting two agent nodes. */
+export interface AgentEdge {
+  from: string;
+  to: string;
+  /** True when data is actively flowing along this edge. */
+  animated: boolean;
+}
+
+/**
+ * The five consulting pipeline stages — used by both the node graph
+ * and the state-derivation hook. Order matches the backend pipeline.
+ */
+export const PIPELINE_STAGES = [
+  { id: "framing", label: "Frame" },
+  { id: "research", label: "Research" },
+  { id: "reviewer", label: "Review" },
+  { id: "synthesis", label: "Synthesize" },
+  { id: "audit", label: "Audit" },
+] as const;

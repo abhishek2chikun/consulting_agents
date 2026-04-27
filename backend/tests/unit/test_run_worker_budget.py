@@ -8,7 +8,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 
 from app.agents.budget import BudgetTracker
 from app.testing.fake_chat_model import FakeChatModel
-from app.workers.run_worker import _attach_budget_tracker
+from app.workers.run_worker import _attach_budget_tracker, _exception_reason
 
 
 def _extract_callbacks(bound: object) -> list[BaseCallbackHandler]:
@@ -46,3 +46,21 @@ def test_attach_budget_tracker_uses_run_id() -> None:
     assert tracker_b._run_id == b
     assert tracker_a._provider == "anthropic"
     assert tracker_b._provider == "openai"
+
+
+def test_exception_reason_includes_type_for_empty_exception_message() -> None:
+    reason = _exception_reason(TimeoutError())
+
+    assert reason == "TimeoutError()"
+
+
+def test_exception_reason_preserves_cause_when_message_is_empty() -> None:
+    try:
+        try:
+            raise RuntimeError("provider read timed out")
+        except RuntimeError as exc:
+            raise TimeoutError() from exc
+    except TimeoutError as exc:
+        reason = _exception_reason(exc)
+
+    assert reason == "TimeoutError: caused by RuntimeError: provider read timed out"

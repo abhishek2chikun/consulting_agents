@@ -62,7 +62,7 @@ class ModelOverridesRequest(BaseModel):
     overrides: dict[str, ModelOverride]
 
 
-SearchProviderName = Literal["tavily", "exa", "perplexity"]
+SearchProviderName = Literal["duckduckgo", "tavily", "exa", "perplexity"]
 
 
 class SearchProviderRequest(BaseModel):

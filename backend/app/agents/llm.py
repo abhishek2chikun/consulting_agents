@@ -35,17 +35,33 @@ V1 design notes:
 
 from __future__ import annotations
 
+import base64
+import json
+import os
 from collections.abc import Callable
-from typing import TypedDict
+from typing import Any, TypedDict
 
+import httpx
 from langchain_anthropic import ChatAnthropic
+from langchain_aws import ChatBedrockConverse
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
+from pydantic import Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.services.settings_service import SettingsService
+
+_BEDROCK_MODEL_MAP: dict[str, str] = {
+    "claude-haiku-4-5-20251001": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "claude-sonnet-4-20250514": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+}
+
+_DEFAULT_AWS_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 class ProviderSpec(TypedDict):
@@ -78,16 +94,307 @@ def _ollama_factory(model: str, key: str | None) -> BaseChatModel:
     return ChatOllama(model=model)
 
 
+def _aws_region() -> str:
+    return os.environ.get("AWS_REGION") or get_settings().aws_region or "us-east-1"
+
+
+def _aws_default_model() -> str:
+    model = os.environ.get("CLAUDE_MODEL") or get_settings().claude_model or _DEFAULT_AWS_MODEL
+    return _BEDROCK_MODEL_MAP.get(model, model)
+
+
+def _bedrock_api_key(key: str | None) -> str:
+    return key or os.environ.get("BEDROCK_API_KEY") or get_settings().bedrock_api_key
+
+
+def _looks_like_aws_access_key_id(value: str) -> bool:
+    return value.startswith(("AKIA", "ASIA")) and len(value) >= 16
+
+
+def _aws_credentials_from_bedrock_key(raw_key: str) -> tuple[str, str] | None:
+    """Extract ``(access_key_id, secret_access_key)`` from known key bundles."""
+    access_key_id: str | None = None
+    secret_access_key: str | None = None
+
+    try:
+        blob = base64.b64decode(raw_key + "==")
+        start = 0
+        for i, b in enumerate(blob):
+            if 0x41 <= b <= 0x7A:  # first printable ASCII letter
+                start = i
+                break
+        content = blob[start:].decode("utf-8")
+        parts = content.split(":", 1)
+        if len(parts) == 2 and _looks_like_aws_access_key_id(parts[0]) and parts[1]:
+            access_key_id, secret_access_key = parts[0], parts[1]
+    except Exception:
+        pass
+
+    if not access_key_id:
+        parts = raw_key.split(":", 1)
+        if len(parts) == 2 and _looks_like_aws_access_key_id(parts[0]) and parts[1]:
+            access_key_id, secret_access_key = parts[0], parts[1]
+
+    if access_key_id and secret_access_key:
+        return access_key_id, secret_access_key
+    return None
+
+
+def _coerce_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+            else:
+                parts.append(str(item))
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
+
+def _extract_json_object(text: str) -> Any:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(stripped[start : end + 1])
+        raise
+
+
+class _BedrockBearerStructuredOutput:
+    def __init__(self, model: _BedrockBearerChatModel, schema: Any) -> None:
+        self._model = model
+        self._schema = schema
+
+    def _structured_messages(self, messages: list[BaseMessage]) -> list[BaseMessage]:
+        schema_json = "{}"
+        if hasattr(self._schema, "model_json_schema"):
+            schema_json = json.dumps(self._schema.model_json_schema(), indent=2)
+
+        instruction = (
+            "Return only a valid JSON object matching this JSON Schema. "
+            "Do not wrap it in Markdown or add explanatory text.\n\n"
+            f"{schema_json}"
+        )
+        return [*messages, HumanMessage(content=instruction)]
+
+    def _parse(self, text: str, *, stop_reason: str | None = None) -> Any:
+        try:
+            data = _extract_json_object(text)
+            if hasattr(self._schema, "model_validate"):
+                return self._schema.model_validate(data)
+            return data
+        except (json.JSONDecodeError, ValidationError) as exc:
+            snippet = text.strip().replace("\n", " ")[:500]
+            stop_context = f" stop_reason={stop_reason!r};" if stop_reason else ""
+            raise ValueError(
+                "AWS Bedrock structured output did not match the expected schema;"
+                f"{stop_context} "
+                f"response starts with: {snippet!r}"
+            ) from exc
+
+    def invoke(self, messages: list[BaseMessage], **kwargs: Any) -> Any:
+        result = self._model.invoke(self._structured_messages(messages), **kwargs)
+        text = result.content if isinstance(result.content, str) else str(result.content)
+        return self._parse(text, stop_reason=result.response_metadata.get("stop_reason"))
+
+    async def ainvoke(self, messages: list[BaseMessage], **kwargs: Any) -> Any:
+        result = await self._model.ainvoke(self._structured_messages(messages), **kwargs)
+        text = result.content if isinstance(result.content, str) else str(result.content)
+        return self._parse(text, stop_reason=result.response_metadata.get("stop_reason"))
+
+
+class _BedrockBearerChatModel(BaseChatModel):
+    """Minimal Bedrock Runtime chat model for API-key Bearer auth."""
+
+    model: str
+    api_key: str = Field(repr=False)
+    region_name: str = "us-east-1"
+    max_tokens: int = 4096
+    temperature: float = 0.2
+    timeout_sec: int = 300
+
+    @property
+    def _llm_type(self) -> str:
+        return "bedrock-bearer"
+
+    @property
+    def _identifying_params(self) -> dict[str, Any]:
+        return {"model": self.model, "region_name": self.region_name}
+
+    def _endpoint(self) -> str:
+        return (
+            f"https://bedrock-runtime.{self.region_name}.amazonaws.com"
+            f"/model/{self.model}/invoke"
+        )
+
+    def _payload(self, messages: list[BaseMessage], **kwargs: Any) -> dict[str, Any]:
+        system_parts: list[str] = []
+        bedrock_messages: list[dict[str, str]] = []
+
+        for message in messages:
+            content = _coerce_message_content(message.content)
+            if message.type == "system":
+                system_parts.append(content)
+                continue
+
+            role = "assistant" if message.type == "ai" else "user"
+            if bedrock_messages and bedrock_messages[-1]["role"] == role:
+                bedrock_messages[-1]["content"] += f"\n\n{content}"
+            else:
+                bedrock_messages.append({"role": role, "content": content})
+
+        if not bedrock_messages:
+            bedrock_messages.append({"role": "user", "content": ""})
+
+        payload: dict[str, Any] = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": int(kwargs.get("max_tokens", self.max_tokens)),
+            "messages": bedrock_messages,
+            "temperature": float(kwargs.get("temperature", self.temperature)),
+        }
+        if system_parts:
+            payload["system"] = "\n\n".join(system_parts)
+        if stop := kwargs.get("stop"):
+            payload["stop_sequences"] = stop
+        return payload
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _chat_result(self, data: dict[str, Any]) -> ChatResult:
+        text_parts = [
+            block.get("text", "")
+            for block in data.get("content", [])
+            if isinstance(block, dict) and block.get("type") == "text"
+        ]
+        if not text_parts and data.get("content"):
+            text_parts = [str(data["content"])]
+        message = AIMessage(
+            content="".join(text_parts),
+            response_metadata={
+                "model": self.model,
+                "usage": data.get("usage", {}),
+                "stop_reason": data.get("stop_reason"),
+            },
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        payload = self._payload(messages, stop=stop, **kwargs)
+        try:
+            with httpx.Client(timeout=self.timeout_sec) as client:
+                response = client.post(self._endpoint(), headers=self._headers(), json=payload)
+            response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(
+                f"AWS Bedrock request timed out after {self.timeout_sec} seconds"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:500]
+            raise RuntimeError(
+                f"AWS Bedrock request failed with HTTP {exc.response.status_code}: {body}"
+            ) from exc
+        return self._chat_result(response.json())
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        payload = self._payload(messages, stop=stop, **kwargs)
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
+                response = await client.post(
+                    self._endpoint(),
+                    headers=self._headers(),
+                    json=payload,
+                )
+            response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(
+                f"AWS Bedrock request timed out after {self.timeout_sec} seconds"
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:500]
+            raise RuntimeError(
+                f"AWS Bedrock request failed with HTTP {exc.response.status_code}: {body}"
+            ) from exc
+        return self._chat_result(response.json())
+
+    def with_structured_output(self, schema: Any, **_: Any) -> _BedrockBearerStructuredOutput:
+        return _BedrockBearerStructuredOutput(self, schema)
+
+
 def _aws_factory(model: str, key: str | None) -> BaseChatModel:
-    # AWS Bedrock uses access_key + secret + region rather than a single
-    # opaque token. Full support is deferred to V1.1; for V1 we register
-    # the entry so settings UIs can list it, but instantiation fails
-    # loudly so no caller ever silently gets the wrong client.
-    raise NotImplementedError(
-        "AWS Bedrock support deferred to V1.1 — Bedrock requires multi-part"
-        " AWS credentials (access key + secret + region) which the V1"
-        " single-key provider model does not yet express."
-    )
+    """Construct a ChatBedrockConverse model.
+
+    Credential resolution order (highest priority first):
+
+    1. ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY`` already in env
+       → boto3's default credential chain handles it automatically.
+    2. ``BEDROCK_API_KEY`` in env — if it is an AWS credential bundle,
+       blob produced by the AWS toolkit.  The parsed access key + secret
+       are injected into ``os.environ`` so boto3's default chain picks them
+       up on the same call.
+    3. ``BEDROCK_API_KEY`` as an API key → direct Bedrock Runtime HTTP with
+       ``Authorization: Bearer ...``.
+    4. Neither → ChatBedrockConverse is created without explicit creds;
+       boto3 will try instance-profile / SSO / etc.
+
+    ``AWS_REGION`` sets the region (default ``us-east-1``).
+    The ``key`` argument (from the encrypted provider_keys table) is used
+    as the Bedrock API key when present; otherwise ``BEDROCK_API_KEY`` is
+    used.
+    """
+    region = _aws_region()
+    bedrock_model = _BEDROCK_MODEL_MAP.get(model, model)
+    settings = get_settings()
+    timeout_sec = settings.llm_timeout_sec
+    max_tokens = settings.llm_max_tokens
+
+    # If standard IAM env vars are already present, let boto3 use them.
+    if not os.environ.get("AWS_ACCESS_KEY_ID"):
+        raw_key = _bedrock_api_key(key)
+        if raw_key:
+            credentials = _aws_credentials_from_bedrock_key(raw_key)
+            if credentials is not None:
+                access_key_id, secret_access_key = credentials
+                os.environ["AWS_ACCESS_KEY_ID"] = access_key_id
+                os.environ["AWS_SECRET_ACCESS_KEY"] = secret_access_key
+            else:
+                return _BedrockBearerChatModel(
+                    model=bedrock_model,
+                    api_key=raw_key,
+                    region_name=region,
+                    timeout_sec=timeout_sec,
+                    max_tokens=max_tokens,
+                )
+
+    return ChatBedrockConverse(model=bedrock_model, region_name=region)  # type: ignore[call-arg]
+
 
 
 PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
@@ -107,9 +414,12 @@ PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
         "requires_key": True,
     },
     "aws": {
-        "default_model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        # Cross-region inference profile for Claude Haiku (us-east-1).
+        # Credentials come from BEDROCK_API_KEY + AWS_REGION env vars,
+        # not the encrypted provider_keys table, so requires_key=False.
+        "default_model": _DEFAULT_AWS_MODEL,
         "factory": _aws_factory,
-        "requires_key": True,
+        "requires_key": False,
     },
     "ollama": {
         "default_model": "llama3.2",
@@ -123,10 +433,10 @@ PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
 # input without poking at the registry directly.
 LLM_PROVIDERS: set[str] = set(PROVIDER_REGISTRY.keys())
 
-# Provider used when no `model_overrides[role]` entry exists. Anthropic
-# is V1's reference provider (the agent's prompts and behavior were
-# designed against Claude); other providers are best-effort.
-DEFAULT_PROVIDER: str = "anthropic"
+# Provider used when no `model_overrides[role]` entry exists.
+# Switched to "aws" for Bedrock-backed end-to-end testing; revert to
+# "anthropic" once a direct Anthropic key is configured.
+DEFAULT_PROVIDER: str = "aws"
 
 
 async def get_chat_model(role: str, *, session: AsyncSession) -> BaseChatModel:
@@ -160,7 +470,11 @@ async def get_chat_model(role: str, *, session: AsyncSession) -> BaseChatModel:
         model = str(role_override["model"])
     else:
         provider = DEFAULT_PROVIDER
-        model = PROVIDER_REGISTRY[DEFAULT_PROVIDER]["default_model"]
+        model = (
+            _aws_default_model()
+            if DEFAULT_PROVIDER == "aws"
+            else PROVIDER_REGISTRY[DEFAULT_PROVIDER]["default_model"]
+        )
 
     if provider not in PROVIDER_REGISTRY:
         raise ValueError(f"Unknown provider: {provider!r}")
@@ -182,6 +496,8 @@ _CLASS_TO_PROVIDER: dict[str, str] = {
     "ChatOpenAI": "openai",
     "ChatGoogleGenerativeAI": "google",
     "ChatBedrock": "aws",
+    "ChatBedrockConverse": "aws",
+    "_BedrockBearerChatModel": "aws",
     "ChatOllama": "ollama",
 }
 

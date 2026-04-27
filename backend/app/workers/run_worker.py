@@ -20,6 +20,7 @@ default factory resolves real chat models from settings via
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -125,9 +126,12 @@ async def start_framing(
                 "document_ids": list(document_ids),
             }
         )
+    except asyncio.CancelledError:
+        await _mark_cancelled(run_id)
+        return
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("framing node failed for run %s", run_id)
-        await _mark_failed(run_id, reason=str(exc))
+        await _mark_failed(run_id, reason=_exception_reason(exc))
         return
 
 
@@ -194,9 +198,12 @@ async def continue_after_framing(
             if await _run_is_cancelling(run_id):
                 cancelled = True
                 break
+    except asyncio.CancelledError:
+        await _mark_cancelled(run_id)
+        return
     except Exception as exc:
         logger.exception("graph execution failed for run %s", run_id)
-        await _mark_failed(run_id, reason=str(exc))
+        await _mark_failed(run_id, reason=_exception_reason(exc))
         return
 
     if cancelled:
@@ -225,6 +232,19 @@ async def _run_is_cancelling(run_id: uuid.UUID) -> bool:
     async with AsyncSessionLocal() as session:
         run = await session.get(Run, run_id)
         return run is not None and run.status == RunStatus.cancelling
+
+
+def _exception_reason(exc: BaseException) -> str:
+    message = str(exc).strip()
+    if message:
+        return f"{type(exc).__name__}: {message}"
+
+    cause = exc.__cause__ or exc.__context__
+    if cause is not None:
+        cause_message = str(cause).strip() or repr(cause)
+        return f"{type(exc).__name__}: caused by {type(cause).__name__}: {cause_message}"
+
+    return repr(exc)
 
 
 async def _mark_cancelled(run_id: uuid.UUID) -> None:

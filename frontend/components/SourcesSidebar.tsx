@@ -1,40 +1,19 @@
 "use client";
 
-/**
- * SourcesSidebar — list of citable sources for a run (M7.4).
- *
- * Renders one card per `Evidence` row from
- * `GET /runs/{id}/evidence`. The list is fetched on mount and
- * refetched whenever a new `artifact_update` event lands (synthesis
- * writes evidence rows just before producing `final_report.md`, so
- * piggybacking on the report-update signal keeps us in sync without
- * a dedicated `evidence_update` event in V1).
- *
- * The parent page passes `highlightedSrcId` (driven by clicks on
- * `[^src_id]` chips inside `<ReportView />`); the matching card gets
- * scrolled into view and visually emphasized.
- */
+import { useEffect, useRef, useState } from "react";
+import { ExternalLink, Globe, FileText } from "lucide-react";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ApiRequestError, getRunEvidence } from "@/lib/api";
 import type { RunEvent } from "@/lib/sse";
 import type { EvidenceItem } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 interface SourcesSidebarProps {
   runId: string;
   events: RunEvent[];
-  /** `src_id` to scroll into view + highlight. */
   highlightedSrcId?: string | null;
 }
 
-/**
- * Latest `artifact_update` event id — used to invalidate the cached
- * evidence list when the worker writes a new artifact (typically
- * `final_report.md`, written immediately after evidence rows are
- * inserted).
- */
 function latestArtifactEventId(events: RunEvent[]): number | null {
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const ev = events[i];
@@ -83,23 +62,22 @@ export function SourcesSidebar({
   }, [runId, artifactEventId]);
 
   return (
-    <Card className="flex h-full flex-col">
-      <CardHeader>
-        <CardTitle className="text-base">Sources</CardTitle>
-      </CardHeader>
-      <CardContent className="flex-1 overflow-y-auto">
+    <div className="panel flex flex-col">
+      <div className="panel-header">
+        <span>Sources</span>
+        <span className="text-[10px] font-medium tracking-normal text-stone-500 normal-case">
+          {items.length}
+        </span>
+      </div>
+      <div className="scroll-thin max-h-[36rem] flex-1 overflow-y-auto p-3">
         {loading && items.length === 0 && (
-          <p className="text-sm text-muted-foreground">Loading sources…</p>
+          <p className="text-xs text-stone-500">Loading sources…</p>
         )}
-        {error && (
-          <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>
-        )}
+        {error && <p className="text-xs text-rose-400">{error}</p>}
         {!loading && !error && items.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            No sources cited yet.
-          </p>
+          <p className="text-xs text-stone-500">No sources cited yet.</p>
         )}
-        <ul className="space-y-3">
+        <ul className="space-y-2">
           {items.map((item) => (
             <SourceCard
               key={item.src_id}
@@ -108,78 +86,70 @@ export function SourcesSidebar({
             />
           ))}
         </ul>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
-interface SourceCardProps {
+function SourceCard({
+  item,
+  highlighted,
+}: {
   item: EvidenceItem;
   highlighted: boolean;
-}
-
-function SourceCard({ item, highlighted }: SourceCardProps) {
+}) {
   const ref = useRef<HTMLLIElement>(null);
 
-  // Scroll into view whenever this card becomes the highlight target.
   useEffect(() => {
     if (highlighted && ref.current) {
       ref.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
   }, [highlighted]);
 
-  const ringClass = highlighted
-    ? "ring-2 ring-amber-400 dark:ring-amber-500"
-    : "ring-1 ring-border";
-
-  const kindBadge = useMemo(() => {
-    const cls =
-      item.kind === "web"
-        ? "bg-sky-100 text-sky-900 dark:bg-sky-900/40 dark:text-sky-200"
-        : "bg-violet-100 text-violet-900 dark:bg-violet-900/40 dark:text-violet-200";
-    return (
-      <span
-        className={`inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-xs font-medium ${cls}`}
-      >
-        {item.kind}
-      </span>
-    );
-  }, [item.kind]);
-
-  const titleNode = item.url ? (
-    <a
-      href={item.url}
-      target="_blank"
-      rel="noreferrer noopener"
-      className="font-medium text-foreground underline-offset-2 hover:underline"
-    >
-      {item.title}
-    </a>
-  ) : (
-    <span className="font-medium text-foreground">{item.title}</span>
-  );
+  const Icon = item.kind === "web" ? Globe : FileText;
+  const tone =
+    item.kind === "web"
+      ? "text-sky-300 bg-sky-500/10"
+      : "text-violet-300 bg-violet-500/10";
 
   return (
     <li
       ref={ref}
       id={`source-${item.src_id}`}
-      className={`rounded-md bg-card p-3 text-sm transition-shadow ${ringClass}`}
+      className={cn(
+        "rounded-lg border p-2.5 text-xs transition-all",
+        highlighted
+          ? "border-amber-400/60 bg-amber-500/5 ring-1 ring-amber-400/30"
+          : "border-white/5 bg-white/[0.02] hover:bg-white/[0.04]",
+      )}
     >
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <code className="rounded bg-muted px-1 py-0.5 text-xs">
-              {item.src_id}
-            </code>
-            {kindBadge}
-          </div>
-          <div className="mt-1 truncate">{titleNode}</div>
-        </div>
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <span className={cn("flex size-5 shrink-0 items-center justify-center rounded-md", tone)}>
+          <Icon className="size-3" />
+        </span>
+        <code className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[9px] text-stone-300">
+          {item.src_id}
+        </code>
+        <span className="ml-auto truncate text-[9px] text-stone-500">
+          {item.provider}
+        </span>
       </div>
-      <p className="mt-2 line-clamp-3 text-muted-foreground">{item.snippet}</p>
-      <div className="mt-2 text-xs text-muted-foreground">
-        provider: {item.provider}
+      <div className="mb-1 truncate font-medium text-stone-100">
+        {item.url ? (
+          <a
+            href={item.url}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="inline-flex items-center gap-1 hover:text-sky-300"
+          >
+            {item.title}
+            <ExternalLink className="size-2.5 shrink-0 opacity-60" />
+          </a>
+        ) : (
+          item.title
+        )}
       </div>
+      <p className="line-clamp-3 leading-relaxed text-stone-400">{item.snippet}</p>
     </li>
   );
 }
