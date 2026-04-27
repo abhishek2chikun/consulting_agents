@@ -293,7 +293,7 @@ class _BedrockBearerChatModel(BaseChatModel):
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
 
-    def _generate(
+    def _generate(  # type: ignore[override]
         self,
         messages: list[BaseMessage],
         stop: list[str] | None = None,
@@ -315,7 +315,7 @@ class _BedrockBearerChatModel(BaseChatModel):
             ) from exc
         return self._chat_result(response.json())
 
-    async def _agenerate(
+    async def _agenerate(  # type: ignore[override]
         self,
         messages: list[BaseMessage],
         stop: list[str] | None = None,
@@ -341,7 +341,9 @@ class _BedrockBearerChatModel(BaseChatModel):
             ) from exc
         return self._chat_result(response.json())
 
-    def with_structured_output(self, schema: Any, **_: Any) -> _BedrockBearerStructuredOutput:
+    def with_structured_output(  # type: ignore[override]
+        self, schema: Any, **_: Any
+    ) -> _BedrockBearerStructuredOutput:
         return _BedrockBearerStructuredOutput(self, schema)
 
 
@@ -390,7 +392,7 @@ def _aws_factory(model: str, key: str | None) -> BaseChatModel:
                     max_tokens=max_tokens,
                 )
 
-    return ChatBedrockConverse(model=bedrock_model, region_name=region)  # type: ignore[call-arg]
+    return ChatBedrockConverse(model=bedrock_model, region_name=region)
 
 
 PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
