@@ -236,10 +236,7 @@ class _BedrockBearerChatModel(BaseChatModel):
         return {"model": self.model, "region_name": self.region_name}
 
     def _endpoint(self) -> str:
-        return (
-            f"https://bedrock-runtime.{self.region_name}.amazonaws.com"
-            f"/model/{self.model}/invoke"
-        )
+        return f"https://bedrock-runtime.{self.region_name}.amazonaws.com/model/{self.model}/invoke"
 
     def _payload(self, messages: list[BaseMessage], **kwargs: Any) -> dict[str, Any]:
         system_parts: list[str] = []
@@ -394,7 +391,6 @@ def _aws_factory(model: str, key: str | None) -> BaseChatModel:
                 )
 
     return ChatBedrockConverse(model=bedrock_model, region_name=region)  # type: ignore[call-arg]
-
 
 
 PROVIDER_REGISTRY: dict[str, ProviderSpec] = {

@@ -1,3 +1,9 @@
+# V1 is single-user local dev. We allow all localhost ports so that
+# Next.js (which increments the port when 3000 is busy) and any other
+# local tooling can reach the API without editing this file. In staging
+# / production the list should be locked to the exact origin(s).
+import re as _re
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,12 +14,6 @@ from app.api.runs import router as runs_router
 from app.api.settings import router as settings_router
 from app.api.tasks import router as tasks_router
 from app.core.config import get_settings
-
-# V1 is single-user local dev. We allow all localhost ports so that
-# Next.js (which increments the port when 3000 is busy) and any other
-# local tooling can reach the API without editing this file. In staging
-# / production the list should be locked to the exact origin(s).
-import re as _re
 
 
 def _is_localhost_origin(origin: str) -> bool:
