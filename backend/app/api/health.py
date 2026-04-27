@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.tools.providers.base import SearchProvider
+from app.agents.tools.providers.duckduckgo import DuckDuckGoProvider
 from app.agents.tools.providers.exa import ExaProvider
 from app.agents.tools.providers.perplexity import PerplexityProvider
 from app.agents.tools.providers.tavily import TavilyProvider
@@ -19,13 +20,16 @@ router = APIRouter(prefix="/health", tags=["health"])
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
 
-def _provider_instance(name: str, api_key: str) -> SearchProvider:
+def _provider_instance(name: str, api_key: str | None) -> SearchProvider:
+    if name == "duckduckgo":
+        return DuckDuckGoProvider()
+    key = api_key or ""
     if name == "tavily":
-        return TavilyProvider(api_key=api_key)
+        return TavilyProvider(api_key=key)
     if name == "exa":
-        return ExaProvider(api_key=api_key)
+        return ExaProvider(api_key=key)
     if name == "perplexity":
-        return PerplexityProvider(api_key=api_key)
+        return PerplexityProvider(api_key=key)
     raise ValueError(f"Unsupported search provider: {name}")
 
 
@@ -37,16 +41,19 @@ async def health_search(
     svc = SettingsService(session)
 
     row = await svc.get_setting("search_provider")
-    provider = row.get("provider") if isinstance(row, dict) else "tavily"
+    provider = row.get("provider") if isinstance(row, dict) else "duckduckgo"
     if not isinstance(provider, str):
-        provider = "tavily"
+        provider = "duckduckgo"
 
-    key = await svc.get_provider_key(provider)
-    if not key:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"No API key configured for provider '{provider}'",
-        )
+    # DuckDuckGo needs no key — skip the key lookup for it.
+    key: str | None = None
+    if provider != "duckduckgo":
+        key = await svc.get_provider_key(provider)
+        if not key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No API key configured for provider '{provider}'",
+            )
 
     try:
         adapter = _provider_instance(provider, key)

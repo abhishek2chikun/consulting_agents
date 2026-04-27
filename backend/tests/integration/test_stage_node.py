@@ -127,3 +127,5 @@ async def test_stage_node_reiterate_scope_passes_target_agents_to_prompt(
     flat = "\n".join(getattr(m, "content", "") for m in msgs)
     assert "pricing" in flat
     assert "Reiterate pass" in flat
+    assert "at most three artifacts" in flat
+    assert "400-900 words per artifact" in flat

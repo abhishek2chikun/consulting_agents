@@ -81,6 +81,19 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
+
+  /* ── Agent graph node-state tokens ── */
+  --node-idle: hsl(220 10% 72%);
+  --node-idle-bg: hsl(220 10% 94%);
+  --node-working: hsl(200 90% 58%);
+  --node-working-glow: hsl(200 90% 58% / 0.45);
+  --node-completed: hsl(152 65% 48%);
+  --node-completed-glow: hsl(152 65% 48% / 0.25);
+  --node-failed: hsl(0 70% 55%);
+  --node-failed-glow: hsl(0 70% 55% / 0.35);
+  --edge-idle: hsl(220 10% 82%);
+  --edge-active: hsl(200 90% 62%);
+  --edge-done: hsl(152 55% 62%);
 }
 
 .dark {
@@ -115,6 +128,19 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
+
+  /* ── Agent graph node-state tokens (dark) ── */
+  --node-idle: hsl(220 10% 35%);
+  --node-idle-bg: hsl(220 10% 18%);
+  --node-working: hsl(200 90% 60%);
+  --node-working-glow: hsl(200 90% 60% / 0.55);
+  --node-completed: hsl(152 70% 50%);
+  --node-completed-glow: hsl(152 70% 50% / 0.3);
+  --node-failed: hsl(0 70% 55%);
+  --node-failed-glow: hsl(0 70% 55% / 0.4);
+  --edge-idle: hsl(220 10% 28%);
+  --edge-active: hsl(200 90% 58%);
+  --edge-done: hsl(152 55% 45%);
 }
 
 @layer base {
@@ -123,12 +149,155 @@
   }
   body {
     @apply bg-background text-foreground;
-    background:
-      linear-gradient(135deg, oklch(0.94 0.025 210 / 0.7), transparent 34%),
-      linear-gradient(315deg, oklch(0.95 0.028 80 / 0.5), transparent 32%),
-      linear-gradient(180deg, oklch(0.985 0.006 210), oklch(0.965 0.006 250));
   }
   html {
     @apply font-sans;
   }
 }
+
+/* ── Landing page gradient (light theme only) ── */
+body:not(.dark) .landing-gradient {
+  background:
+    linear-gradient(135deg, oklch(0.94 0.025 210 / 0.7), transparent 34%),
+    linear-gradient(315deg, oklch(0.95 0.028 80 / 0.5), transparent 32%),
+    linear-gradient(180deg, oklch(0.985 0.006 210), oklch(0.965 0.006 250));
+}
+
+/* ── Run page dark canvas background ── */
+.run-dark-bg {
+  background:
+    radial-gradient(1200px 600px at 50% -10%, hsl(210 60% 18% / 0.55), transparent 60%),
+    radial-gradient(900px 500px at 90% 110%, hsl(265 50% 18% / 0.35), transparent 60%),
+    linear-gradient(180deg, hsl(225 24% 7%) 0%, hsl(222 22% 4%) 100%);
+}
+
+/* Subtle dotted pattern overlay for the run canvas */
+.run-dark-bg::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(hsl(0 0% 100% / 0.025) 1px, transparent 1px);
+  background-size: 22px 22px;
+  mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
+  z-index: 0;
+}
+
+/* ── Glassmorphism card ── */
+.glass {
+  background: hsl(0 0% 100% / 0.04);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  border: 1px solid hsl(0 0% 100% / 0.07);
+}
+
+.glass-strong {
+  background: hsl(225 24% 9% / 0.72);
+  backdrop-filter: blur(28px) saturate(1.5);
+  -webkit-backdrop-filter: blur(28px) saturate(1.5);
+  border: 1px solid hsl(0 0% 100% / 0.06);
+}
+
+/* ── Sleek panel — primary surface used across run page ── */
+.panel {
+  background: linear-gradient(180deg, hsl(225 18% 11% / 0.7) 0%, hsl(225 18% 8% / 0.7) 100%);
+  border: 1px solid hsl(0 0% 100% / 0.06);
+  border-radius: 14px;
+  backdrop-filter: blur(18px) saturate(1.3);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid hsl(0 0% 100% / 0.05);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: hsl(220 10% 60%);
+}
+
+/* Custom thin scrollbar for panels */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(220 10% 25%) transparent;
+}
+.scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scroll-thin::-webkit-scrollbar-track { background: transparent; }
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: hsl(220 10% 22%);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover { background: hsl(220 10% 30%); background-clip: padding-box; border: 2px solid transparent; }
+
+/* Soft shimmer on indeterminate progress */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.shimmer {
+  background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.06), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 2.2s linear infinite;
+}
+
+/* ── Agent graph keyframe animations ── */
+@keyframes node-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 var(--node-working-glow);
+    filter: brightness(1);
+  }
+  50% {
+    box-shadow: 0 0 24px 8px var(--node-working-glow);
+    filter: brightness(1.15);
+  }
+}
+
+@keyframes node-glow-ring {
+  0% { transform: scale(0.85); opacity: 0.6; }
+  50% { transform: scale(1.3); opacity: 0; }
+  100% { transform: scale(0.85); opacity: 0; }
+}
+
+@keyframes edge-flow {
+  0% { stroke-dashoffset: 24; }
+  100% { stroke-dashoffset: 0; }
+}
+
+@keyframes fade-in-up {
+  0% { opacity: 0; transform: translateY(16px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes subtle-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+.animate-node-pulse {
+  animation: node-pulse 2s ease-in-out infinite;
+}
+
+.animate-glow-ring {
+  animation: node-glow-ring 2s ease-out infinite;
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.5s ease-out both;
+}
+
+.animate-subtle-float {
+  animation: subtle-float 3s ease-in-out infinite;
+}
+
+/* ── Staggered entrance delays ── */
+.delay-100 { animation-delay: 100ms; }
+.delay-200 { animation-delay: 200ms; }
+.delay-300 { animation-delay: 300ms; }
+.delay-400 { animation-delay: 400ms; }
+.delay-500 { animation-delay: 500ms; }

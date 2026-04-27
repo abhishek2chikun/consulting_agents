@@ -104,18 +104,50 @@ async def test_synthesis_writes_final_report_and_appends_sources(
 
 
 @pytest.mark.asyncio
-async def test_synthesis_raises_on_unknown_citation(
+async def test_synthesis_self_heals_unknown_citation(
     run_with_evidence: uuid.UUID,
 ) -> None:
+    # Model fabricates an unknown src_id three times in a row; the
+    # node should NOT raise — instead it strips the bogus token and
+    # still produces a report.
     body = "Bad claim [^ghost]."
-    fake = FakeChatModel(responses=[body])
+    fake = FakeChatModel(responses=[body, body, body])
     node = build_synthesis_node(model=fake)
 
-    with pytest.raises(CitationError, match="ghost"):
-        await node(
-            {
-                "run_id": str(run_with_evidence),
-                "goal": "x",
-                "artifacts": {},
-            }
-        )
+    out = await node(
+        {
+            "run_id": str(run_with_evidence),
+            "goal": "x",
+            "artifacts": {},
+        }
+    )
+    report = out["artifacts"][REPORT_PATH]
+    assert "[^ghost]" not in report
+    assert "## Sources" in report
+
+
+@pytest.mark.asyncio
+async def test_synthesis_recovers_on_retry(
+    run_with_evidence: uuid.UUID,
+) -> None:
+    # First attempt fabricates, second attempt is clean.
+    bad = "Bad claim [^ghost]."
+    good = "Good claim [^s1]."
+    fake = FakeChatModel(responses=[bad, good, good])
+    node = build_synthesis_node(model=fake)
+
+    out = await node(
+        {
+            "run_id": str(run_with_evidence),
+            "goal": "x",
+            "artifacts": {},
+        }
+    )
+    report = out["artifacts"][REPORT_PATH]
+    assert "[^s1]" in report
+    assert "[^ghost]" not in report
+
+
+def test_citation_error_class_still_exported() -> None:
+    # Kept for back-compat with downstream callers / tests.
+    assert issubclass(CitationError, ValueError)

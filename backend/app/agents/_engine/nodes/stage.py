@@ -32,7 +32,9 @@ from app.models import Artifact, Evidence, EvidenceKind
 
 class ArtifactFile(BaseModel):
     path: str
-    content: str
+    content: str = Field(
+        description="Concise Markdown artifact content, ideally 400-900 words.",
+    )
     kind: Literal["markdown", "json", "txt"] = "markdown"
 
 
@@ -52,8 +54,14 @@ class StageOutput(BaseModel):
     that back the citations referenced inside those files.
     """
 
-    artifacts: list[ArtifactFile] = Field(default_factory=list)
-    evidence: list[EvidenceCitation] = Field(default_factory=list)
+    artifacts: list[ArtifactFile] = Field(
+        default_factory=list,
+        description="One to three concise artifacts for this stage.",
+    )
+    evidence: list[EvidenceCitation] = Field(
+        default_factory=list,
+        description="Three to eight evidence rows cited by artifact content.",
+    )
     summary: str = ""
 
 
@@ -106,7 +114,10 @@ def make_stage_node(
             f"{scope_clause}"
             f"existing_artifacts:\n{_format_existing(existing)}\n\n"
             "Produce a StageOutput object with artifacts (each citing "
-            "evidence via [^src_id] tokens) and a matching evidence list."
+            "evidence via [^src_id] tokens) and a matching evidence list. "
+            "Keep the response compact enough for one provider call: at most "
+            "three artifacts, 400-900 words per artifact, and only the most "
+            "decision-relevant evidence rows. Return valid JSON only."
         )
 
         structured = model.with_structured_output(StageOutput)  # type: ignore[attr-defined]

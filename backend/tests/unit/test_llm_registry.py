@@ -6,6 +6,7 @@ constructors so they run without a database, network, or real API key.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -47,6 +48,17 @@ def _patch_service(
     service.get_provider_key = AsyncMock(side_effect=_get_provider_key)
 
     monkeypatch.setattr(llm_module, "SettingsService", lambda session: service)
+    monkeypatch.setattr(
+        llm_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            aws_region="us-east-1",
+            bedrock_api_key="",
+            claude_model=PROVIDER_REGISTRY[DEFAULT_PROVIDER]["default_model"],
+            llm_timeout_sec=300,
+            llm_max_tokens=16000,
+        ),
+    )
     return service
 
 
@@ -72,27 +84,43 @@ async def test_get_chat_model_uses_override(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_get_chat_model_uses_default_when_no_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Falls back to DEFAULT_PROVIDER + provider's default_model when no override."""
+    """Falls back to DEFAULT_PROVIDER + provider's default_model when no override.
+
+    DEFAULT_PROVIDER is now ``"aws"`` which uses ChatBedrockConverse.
+    We mock the factory so no real boto3 call is made.
+    """
     _patch_service(
         monkeypatch,
         overrides=None,
-        keys={"anthropic": "sk-default"},
+        keys={"aws": None},  # aws requires_key=False, key value irrelevant
     )
-    constructor = MagicMock(return_value="default-model")
-    monkeypatch.setattr(llm_module, "ChatAnthropic", constructor)
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
+    monkeypatch.setenv("CLAUDE_MODEL", PROVIDER_REGISTRY[DEFAULT_PROVIDER]["default_model"])
+    constructor = MagicMock(return_value="bedrock-default-model")
+    monkeypatch.setattr(llm_module, "ChatBedrockConverse", constructor)
 
     session = MagicMock(spec=AsyncSession)
     result = await get_chat_model("framing", session=session)
 
-    assert result == "default-model"
-    expected_model = PROVIDER_REGISTRY[DEFAULT_PROVIDER]["default_model"]
-    constructor.assert_called_once_with(model=expected_model, api_key="sk-default")
+    assert result == "bedrock-default-model"
+    # The factory passes model= and region_name= (at minimum).
+    call_kwargs = constructor.call_args.kwargs
+    assert call_kwargs.get("model") == PROVIDER_REGISTRY[DEFAULT_PROVIDER]["default_model"]
 
 
 @pytest.mark.asyncio
 async def test_get_chat_model_raises_when_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provider requires a key but none is configured -> ValueError."""
-    _patch_service(monkeypatch, overrides=None, keys={"anthropic": None})
+    """Provider requires a key but none is configured -> ValueError.
+
+    Use an explicit anthropic override (requires_key=True) to exercise
+    the missing-key guard — aws is now requires_key=False so it won't raise.
+    """
+    _patch_service(
+        monkeypatch,
+        overrides={"framing": {"provider": "anthropic", "model": "claude-3-5-haiku-latest"}},
+        keys={"anthropic": None},
+    )
 
     session = MagicMock(spec=AsyncSession)
     with pytest.raises(ValueError, match="No API key configured for provider 'anthropic'"):
@@ -139,22 +167,99 @@ async def test_get_chat_model_ollama_no_key_required(
 
 
 @pytest.mark.asyncio
-async def test_get_chat_model_aws_not_implemented(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AWS Bedrock support is deferred; the factory must raise NotImplementedError."""
+async def test_get_chat_model_aws_constructs_bedrock_converse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AWS Bedrock factory is now implemented via ChatBedrockConverse."""
     _patch_service(
         monkeypatch,
         overrides={
             "framing": {
                 "provider": "aws",
-                "model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                "model": "us.anthropic.claude-haiku-3-5-20241022-v1:0",
             }
         },
-        keys={"aws": "some-blob"},
+        keys={"aws": None},  # requires_key=False; env vars supply real creds
     )
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
+    constructor = MagicMock(return_value="bedrock-instance")
+    monkeypatch.setattr(llm_module, "ChatBedrockConverse", constructor)
 
     session = MagicMock(spec=AsyncSession)
-    with pytest.raises(NotImplementedError, match="AWS Bedrock"):
-        await get_chat_model("framing", session=session)
+    result = await get_chat_model("framing", session=session)
+
+    assert result == "bedrock-instance"
+    # Factory must forward the model id.
+    call_kwargs = constructor.call_args.kwargs
+    assert call_kwargs.get("model") == "us.anthropic.claude-haiku-3-5-20241022-v1:0"
+
+
+@pytest.mark.asyncio
+async def test_get_chat_model_aws_uses_bearer_bedrock_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-credential BEDROCK_API_KEY uses direct Bearer-token Bedrock HTTP."""
+    _patch_service(
+        monkeypatch,
+        overrides={
+            "framing": {
+                "provider": "aws",
+                "model": "us.anthropic.claude-haiku-3-5-20241022-v1:0",
+            }
+        },
+        keys={"aws": "bedrock:api-key"},
+    )
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+
+    session = MagicMock(spec=AsyncSession)
+    result = await get_chat_model("framing", session=session)
+
+    assert type(result).__name__ == "_BedrockBearerChatModel"
+    assert result.model == "us.anthropic.claude-haiku-3-5-20241022-v1:0"
+    assert result.region_name == "us-west-2"
+    assert result.timeout_sec == 300
+    assert result.max_tokens == 16000
+    assert llm_module.provider_name_for(result) == "aws"
+
+
+@pytest.mark.asyncio
+async def test_get_chat_model_aws_bearer_uses_configured_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bearer-token Bedrock calls use the app-level LLM timeout setting."""
+    _patch_service(
+        monkeypatch,
+        overrides={
+            "research": {
+                "provider": "aws",
+                "model": "us.anthropic.claude-haiku-3-5-20241022-v1:0",
+            }
+        },
+        keys={"aws": "bedrock:api-key"},
+    )
+    monkeypatch.setattr(
+        llm_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            aws_region="us-east-1",
+            bedrock_api_key="",
+            claude_model=PROVIDER_REGISTRY[DEFAULT_PROVIDER]["default_model"],
+            llm_timeout_sec=900,
+            llm_max_tokens=24000,
+        ),
+    )
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+
+    session = MagicMock(spec=AsyncSession)
+    result = await get_chat_model("research", session=session)
+
+    assert type(result).__name__ == "_BedrockBearerChatModel"
+    assert result.timeout_sec == 900
+    assert result.max_tokens == 24000
 
 
 def test_provider_registry_has_all_llm_providers() -> None:
