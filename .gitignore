@@ -4,6 +4,9 @@ __pycache__/
 *.pyc
 .DS_Store
 
+# Git worktrees for feature branches
+.worktrees/
+
 # Local upload storage (M3.3); the directory is recreated on demand.
 data/
 
