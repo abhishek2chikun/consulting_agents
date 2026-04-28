@@ -28,6 +28,19 @@ class Settings(BaseSettings):
     # service ensures the directory exists before writing.
     upload_dir: Path = Path("data/uploads")
 
+    # ---- V1.6: run lifecycle + worker fanout knobs ----
+    # Hard cap on total wall-clock per run (seconds). Default: 120 minutes.
+    run_timeout_seconds: int = 7200
+    # How often the heartbeat task bumps `runs.heartbeat_at`.
+    heartbeat_interval_seconds: int = 30
+    # Runs whose `heartbeat_at` is older than this are considered stale and
+    # eligible for reaping by the recovery sweeper.
+    stale_run_threshold_seconds: int = 300
+    # asyncio.Semaphore cap for intra-stage worker subagent fanout.
+    worker_concurrency: int = 4
+    # Max ReAct tool-call iterations per stage / worker.
+    react_max_iterations: int = 6
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

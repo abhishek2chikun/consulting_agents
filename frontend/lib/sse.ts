@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { TERMINAL_RUN_EVENT_TYPES } from "@/lib/runEvents";
+
 export interface RunEvent {
   id: number;
   run_id: string;
@@ -17,12 +19,6 @@ const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"
  * Terminal SSE event types — once any of these arrive the run is over
  * and there is no point keeping the EventSource connection alive.
  */
-const TERMINAL_EVENT_TYPES = new Set([
-  "run_completed",
-  "run_failed",
-  "run_cancelled",
-]);
-
 const RUN_EVENT_TYPES = [
   "artifact_update",
   "agent_message",
@@ -31,6 +27,7 @@ const RUN_EVENT_TYPES = [
   "cancel_ack",
   "run_completed",
   "run_failed",
+  "system.run_failed",
   "run_cancelled",
 ] as const;
 
@@ -107,7 +104,7 @@ export function useEventStream(runId: string | null) {
           });
 
           // If this is a terminal event, close the connection for good.
-          if (TERMINAL_EVENT_TYPES.has(parsed.type)) {
+          if (TERMINAL_RUN_EVENT_TYPES.has(parsed.type)) {
             terminalRef.current = true;
             es?.close();
             setStatus("closed");

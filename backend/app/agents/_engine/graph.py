@@ -36,8 +36,6 @@ def build_consulting_graph(
         raise ValueError(f"profile {profile.slug} must define at least one stage")
 
     tools = tools_factory() if tools_factory is not None else []
-    max_attempts = max_stage_retries + 1
-
     framing_model = model_factory("framing")
     research_model = model_factory("research")
     reviewer_model = model_factory("reviewer")
@@ -76,6 +74,9 @@ def build_consulting_graph(
 
     for stage in profile.stages:
         reviewer_node = f"reviewer_{stage.node_name}"
+        stage_max_retries = (
+            stage.max_retries if stage.max_retries is not None else max_stage_retries
+        )
         graph.add_edge(stage.node_name, reviewer_node)
         graph.add_conditional_edges(
             reviewer_node,
@@ -83,7 +84,7 @@ def build_consulting_graph(
                 stage.slug,
                 next_stage=stage.next_stage_node,
                 redo_stage=stage.node_name,
-                max_attempts=max_attempts,
+                max_attempts=stage_max_retries + 1,
             ),
             {
                 stage.node_name: stage.node_name,

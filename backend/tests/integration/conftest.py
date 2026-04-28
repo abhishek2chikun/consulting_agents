@@ -9,6 +9,13 @@ transition the row to `failed`. Without this fixture, those tasks would
 still be running when the next test starts and would log noise (and
 possibly hold DB connections open across event-loop boundaries on the
 shared session-scoped loop).
+
+Run API tests that need scripted models should override
+`app.api.runs.get_run_model_factory_builder` via
+`app.dependency_overrides[...]`, returning a per-run builder that yields
+the test `ModelFactory`. That keeps fake/scripted models in explicit
+test wiring while the production `default_model_factory(...)` path stays
+guarded against them.
 """
 
 from __future__ import annotations

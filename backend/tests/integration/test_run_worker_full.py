@@ -36,6 +36,7 @@ from app.models import (
 )
 from app.testing.fake_chat_model import FakeChatModel
 from app.workers.run_worker import continue_after_framing, start_framing
+from tests.integration.v16_smoke_helpers import ScriptedResearchModel
 
 
 @pytest_asyncio.fixture
@@ -53,26 +54,27 @@ async def fresh_run() -> AsyncIterator[uuid.UUID]:
         yield run.id
 
 
-def _stage_payload(stage_slug: str, src_id: str) -> dict:
+def _stage_payload(agent_id: str, src_id: str) -> dict:
+    _stage_slug, worker_slug = agent_id.split(".", 1)
     return {
         "artifacts": [
             {
-                "path": f"{stage_slug}/findings.md",
-                "content": f"{stage_slug} finding [^{src_id}].",
+                "path": "findings.md",
+                "content": f"{agent_id} finding [^{src_id}].",
                 "kind": "markdown",
             }
         ],
         "evidence": [
             {
                 "src_id": src_id,
-                "title": f"{stage_slug} source",
+                "title": f"{worker_slug} source",
                 "url": f"https://example.com/{src_id}",
                 "snippet": "snippet",
                 "kind": "web",
                 "provider": "tavily",
             }
         ],
-        "summary": f"{stage_slug} summary",
+        "summary": f"{agent_id} summary",
     }
 
 
@@ -118,19 +120,27 @@ def _build_factories(
     }
 
     stages = stage_payloads or {
-        "stage1_foundation": [_stage_payload("stage1_foundation", "s1")],
-        "stage2_competitive": [_stage_payload("stage2_competitive", "s2")],
-        "stage3_risk": [_stage_payload("stage3_risk", "s3")],
-        "stage4_demand": [_stage_payload("stage4_demand", "s4")],
-        "stage5_strategy": [_stage_payload("stage5_strategy", "s5")],
+        "stage1_foundation.market_sizing": [
+            _stage_payload("stage1_foundation.market_sizing", "s1")
+        ],
+        "stage1_foundation.customer": [_stage_payload("stage1_foundation.customer", "s2")],
+        "stage1_foundation.regulatory": [_stage_payload("stage1_foundation.regulatory", "s3")],
+        "stage2_competitive.competitor": [_stage_payload("stage2_competitive.competitor", "s4")],
+        "stage2_competitive.channel": [_stage_payload("stage2_competitive.channel", "s5")],
+        "stage2_competitive.pricing": [_stage_payload("stage2_competitive.pricing", "s6")],
+        "stage3_risk.risk": [_stage_payload("stage3_risk.risk", "s7")],
+        "stage3_risk.regulatory_risk": [_stage_payload("stage3_risk.regulatory_risk", "s8")],
+        "stage3_risk.operational_risk": [_stage_payload("stage3_risk.operational_risk", "s9")],
+        "stage4_demand.demand_drivers": [_stage_payload("stage4_demand.demand_drivers", "s10")],
+        "stage4_demand.willingness_to_pay": [
+            _stage_payload("stage4_demand.willingness_to_pay", "s11")
+        ],
+        "stage4_demand.segment_priority": [_stage_payload("stage4_demand.segment_priority", "s12")],
+        "stage5_strategy.go_to_market": [_stage_payload("stage5_strategy.go_to_market", "s13")],
+        "stage5_strategy.partnerships": [_stage_payload("stage5_strategy.partnerships", "s14")],
+        "stage5_strategy.milestones": [_stage_payload("stage5_strategy.milestones", "s15")],
     }
-    research_queue = (
-        stages["stage1_foundation"]
-        + stages["stage2_competitive"]
-        + stages["stage3_risk"]
-        + stages["stage4_demand"]
-        + stages["stage5_strategy"]
-    )
+    structured_by_agent = {agent_id: payloads[0] for agent_id, payloads in stages.items()}
 
     gates = gate_verdicts or {
         "stage1_foundation": [_gate("stage1_foundation", "advance")],
@@ -148,14 +158,17 @@ def _build_factories(
     )
 
     framing_model = FakeChatModel(structured_responses=[framing_response])
-    research_model = FakeChatModel(structured_responses=research_queue)
+    research_model = ScriptedResearchModel(
+        tool_calls_by_agent={},
+        structured_responses_by_agent=structured_by_agent,
+    )
     reviewer_model = FakeChatModel(structured_responses=reviewer_queue)
     synthesis_model = FakeChatModel(
         responses=[
             synthesis_text
             or (
                 "# Final Report\n\n## Executive Summary\n"
-                "- s1 [^s1] s2 [^s2] s3 [^s3] s4 [^s4] s5 [^s5].\n"
+                "- s1 [^s1] s2 [^s4] s3 [^s7] s4 [^s10] s5 [^s13].\n"
             )
         ]
     )
@@ -282,11 +295,11 @@ async def test_continue_after_framing_drives_full_pipeline_to_completed(
 
     assert run is not None
     assert run.status == RunStatus.completed
-    assert "stage1_foundation/findings.md" in artifact_paths
-    assert "stage2_competitive/findings.md" in artifact_paths
-    assert "stage3_risk/findings.md" in artifact_paths
-    assert "stage4_demand/findings.md" in artifact_paths
-    assert "stage5_strategy/findings.md" in artifact_paths
+    assert any(path.startswith("stage1_foundation/") for path in artifact_paths)
+    assert any(path.startswith("stage2_competitive/") for path in artifact_paths)
+    assert any(path.startswith("stage3_risk/") for path in artifact_paths)
+    assert any(path.startswith("stage4_demand/") for path in artifact_paths)
+    assert any(path.startswith("stage5_strategy/") for path in artifact_paths)
     assert "final_report.md" in artifact_paths
     assert "audit.md" in artifact_paths
     assert gate_count == 5

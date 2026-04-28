@@ -9,11 +9,33 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
+from app.agents._engine.profile import ConsultingProfile, ProfileStage
 from app.agents.market_entry.nodes.stage import make_stage_node
 from app.agents.market_entry.state import RunState
 from app.core.db import AsyncSessionLocal
 from app.models import SINGLETON_USER_ID, Artifact, Evidence, Run, RunStatus
 from app.testing.fake_chat_model import FakeChatModel
+
+
+def _profile_without_workers(stage_slug: str) -> ConsultingProfile:
+    return ConsultingProfile(
+        slug="test_stage_profile",
+        display_name="Test Stage Profile",
+        prompts_package="app.agents.market_entry.prompts",
+        framing_prompt="framing.md",
+        stages=(
+            ProfileStage(
+                slug=stage_slug,
+                node_name=stage_slug,
+                next_stage_node="synthesis",
+                prompt_file=f"{stage_slug}.md",
+            ),
+        ),
+        reviewer_prompt_package="app.agents.market_entry.prompts",
+        reviewer_prompt="reviewer.md",
+        synthesis_prompt="synthesis.md",
+        audit_prompt="audit.md",
+    )
 
 
 @pytest_asyncio.fixture
@@ -60,7 +82,7 @@ async def test_stage_node_persists_artifacts_and_evidence(
         "summary": f"{stage_slug} pass complete",
     }
     fake = FakeChatModel(structured_responses=[payload])
-    node = make_stage_node(stage_slug, model=fake)
+    node = make_stage_node(stage_slug, model=fake, profile=_profile_without_workers(stage_slug))
 
     state: RunState = {
         "run_id": str(run_id),
@@ -106,7 +128,11 @@ async def test_stage_node_reiterate_scope_passes_target_agents_to_prompt(
         "evidence": [{"src_id": "p1", "title": "Pricing src", "snippet": "x"}],
     }
     fake = FakeChatModel(structured_responses=[payload])
-    node = make_stage_node("stage2_competitive", model=fake)
+    node = make_stage_node(
+        "stage2_competitive",
+        model=fake,
+        profile=_profile_without_workers("stage2_competitive"),
+    )
 
     state: RunState = {
         "run_id": str(run_id),

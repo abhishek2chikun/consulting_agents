@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agents._engine.profile import ConsultingProfile
+from app.agents._engine.skills import inject_skills
 from app.agents._engine.state import RunState
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
@@ -48,6 +49,14 @@ def make_reviewer_node(
 
     profile = profile or _default_profile()
     system_prompt = profile.load_prompt("reviewer")
+    reviewer_prompt_file = profile.reviewer_prompt_for_stage.get(stage_slug)
+    if reviewer_prompt_file:
+        stage_prompt = profile._read(profile.reviewer_prompt_package, reviewer_prompt_file)
+        system_prompt = f"{system_prompt}\n\n{stage_prompt}"
+    system_prompt = inject_skills(
+        system_prompt,
+        profile.reviewer_skills_per_stage.get(stage_slug, ()),
+    )
 
     async def reviewer_node(state: RunState) -> RunState:
         attempts = dict(state.get("stage_attempts", {}) or {})

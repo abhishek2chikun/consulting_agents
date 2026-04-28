@@ -8,15 +8,25 @@ from pathlib import Path
 
 import pytest
 import respx
+from cryptography.fernet import Fernet
 from httpx import Response
 from sqlalchemy import delete, select
 
 from app.agents.tools.web_search import build_web_search
+from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
 from app.models import SINGLETON_USER_ID, Evidence, Run, RunStatus
 from app.services.settings_service import SettingsService
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "tavily_response.json"
+
+
+@pytest.fixture(autouse=True)
+def _fernet_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FERNET_KEY", Fernet.generate_key().decode())
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio
