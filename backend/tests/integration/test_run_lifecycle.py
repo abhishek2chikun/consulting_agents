@@ -275,6 +275,11 @@ async def test_answers_drive_full_pipeline_and_persist_artifacts(
         )
         assert submit.status_code == 204, submit.text
 
+        async with AsyncSessionLocal() as session:
+            run = await session.get(Run, run_id)
+            assert run is not None
+            assert run.status == RunStatus.questioning
+
         # Worker now drives the full pipeline; wait for completion.
         await _wait_for_run_status(run_id, RunStatus.completed)
 
