@@ -30,6 +30,22 @@ class FakeTool:
         return "tool result: market CAGR is 12%"
 
 
+class AsyncFakeTool:
+    name = "lookup_market_async"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def ainvoke(self, args: dict[str, Any]) -> str:
+        self.calls.append(args)
+        return "async tool result: market CAGR is 14%"
+
+
+class UnsupportedBindFakeChatModel(FakeChatModel):
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
+
+
 @pytest_asyncio.fixture
 async def run_id() -> AsyncIterator[uuid.UUID]:
     async with AsyncSessionLocal() as session:
@@ -64,6 +80,12 @@ def _payload(path: str = "stage1_foundation/findings.md") -> dict[str, Any]:
         "evidence": [{"src_id": "s1", "title": "Source 1", "snippet": "Snippet"}],
         "summary": "stage complete",
     }
+
+
+def _malformed_tool_call_message(tool_calls: list[dict[str, Any]]) -> AIMessage:
+    message = AIMessage(content="Malformed tool call")
+    object.__setattr__(message, "tool_calls", tool_calls)
+    return message
 
 
 @pytest.mark.asyncio
@@ -211,3 +233,125 @@ async def test_stage_node_max_iteration_cap_still_finalizes(
     assert tool.calls == [{"query": "first"}]
     assert len(fake.calls) == 1
     get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_stage_node_bind_tools_not_implemented_falls_back_and_finalizes(
+    run_id: uuid.UUID,
+) -> None:
+    fake = UnsupportedBindFakeChatModel(
+        responses=[AIMessage(content="No tool needed")],
+        structured_responses=[_payload()],
+    )
+    node = make_stage_node("stage1_foundation", model=fake, tools=[FakeTool()])
+
+    out = await node(_state(run_id))
+
+    assert out["artifacts"]["stage1_foundation/findings.md"].startswith("Finding")
+    async with AsyncSessionLocal() as session:
+        warning_rows = (
+            (
+                await session.execute(
+                    select(Event).where(
+                        Event.run_id == run_id,
+                        Event.type == "agent_message",
+                        Event.payload["text"].astext.contains(
+                            "stage1_foundation: produced StageOutput without tool use"
+                        ),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(warning_rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_stage_node_unknown_tool_name_appends_error_and_finalizes(
+    run_id: uuid.UUID,
+) -> None:
+    fake = FakeChatModel(
+        responses=[
+            AIMessage(
+                content="Try unavailable tool",
+                tool_calls=[
+                    {
+                        "name": "missing_tool",
+                        "args": {"query": "EU EV charging"},
+                        "id": "call_missing",
+                    }
+                ],
+            ),
+            AIMessage(content="Ready to finalize"),
+        ],
+        structured_responses=[_payload()],
+    )
+    node = make_stage_node("stage1_foundation", model=fake, tools=[FakeTool()])
+
+    await node(_state(run_id))
+
+    _, structured_messages = fake.structured_calls[0]
+    assert any(
+        isinstance(message, ToolMessage)
+        and message.tool_call_id == "call_missing"
+        and "Tool not found: missing_tool" in str(message.content)
+        for message in structured_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_stage_node_malformed_tool_call_missing_name_appends_error_and_finalizes(
+    run_id: uuid.UUID,
+) -> None:
+    fake = FakeChatModel(
+        responses=[
+            _malformed_tool_call_message([{"args": {"query": "EU EV charging"}, "id": "bad_1"}]),
+            AIMessage(content="Ready to finalize"),
+        ],
+        structured_responses=[_payload()],
+    )
+    node = make_stage_node("stage1_foundation", model=fake, tools=[FakeTool()])
+
+    await node(_state(run_id))
+
+    _, structured_messages = fake.structured_calls[0]
+    assert any(
+        isinstance(message, ToolMessage)
+        and message.tool_call_id == "bad_1"
+        and "Malformed tool call: missing tool name" in str(message.content)
+        for message in structured_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_stage_node_invokes_async_tool_with_default_args_when_args_missing(
+    run_id: uuid.UUID,
+) -> None:
+    tool = AsyncFakeTool()
+    fake = FakeChatModel(
+        responses=[
+            _malformed_tool_call_message(
+                [
+                    {
+                        "name": "lookup_market_async",
+                        "id": "async_call",
+                    }
+                ]
+            ),
+            AIMessage(content="Ready to finalize"),
+        ],
+        structured_responses=[_payload()],
+    )
+    node = make_stage_node("stage1_foundation", model=fake, tools=[tool])
+
+    await node(_state(run_id))
+
+    assert tool.calls == [{}]
+    _, structured_messages = fake.structured_calls[0]
+    assert any(
+        isinstance(message, ToolMessage)
+        and message.tool_call_id == "async_call"
+        and message.content == "async tool result: market CAGR is 14%"
+        for message in structured_messages
+    )

@@ -96,6 +96,30 @@ def _tool_name(tool: object) -> str | None:
     return name if isinstance(name, str) else None
 
 
+def _safe_bind_tools(model: object, tools: list[object]) -> object:
+    if not hasattr(model, "bind_tools"):
+        return model
+    try:
+        return cast(Any, model).bind_tools(tools)
+    except NotImplementedError:
+        return model
+
+
+def _normalize_tool_call(call: object, index: int) -> tuple[str | None, str, object]:
+    if isinstance(call, dict):
+        raw_name = call.get("name")
+        raw_id = call.get("id")
+        args = call.get("args") or {}
+    else:
+        raw_name = getattr(call, "name", None)
+        raw_id = getattr(call, "id", None)
+        args = getattr(call, "args", None) or {}
+
+    name = raw_name if isinstance(raw_name, str) and raw_name else None
+    tool_call_id = raw_id if isinstance(raw_id, str) and raw_id else f"malformed_tool_call_{index}"
+    return name, tool_call_id, args
+
+
 async def _invoke_tool(tool: object, args: object) -> object:
     if hasattr(tool, "ainvoke"):
         return await cast(Any, tool).ainvoke(args)
@@ -160,9 +184,7 @@ def make_stage_node(
         executed_tool_calls = 0
 
         if available_tools:
-            loop_model = (
-                model.bind_tools(available_tools) if hasattr(model, "bind_tools") else model
-            )
+            loop_model = _safe_bind_tools(model, available_tools)
             tools_by_name = {name: tool for tool in available_tools if (name := _tool_name(tool))}
             for _ in range(get_settings().react_max_iterations):
                 ai = await cast(Any, loop_model).ainvoke(messages)
@@ -172,20 +194,29 @@ def make_stage_node(
                 tool_calls = ai.tool_calls or []
                 if not tool_calls:
                     break
-                for call in tool_calls:
-                    tool = tools_by_name.get(call["name"])
+                for index, call in enumerate(tool_calls):
+                    name, tool_call_id, args = _normalize_tool_call(call, index)
+                    if name is None:
+                        messages.append(
+                            ToolMessage(
+                                content="Malformed tool call: missing tool name",
+                                tool_call_id=tool_call_id,
+                            )
+                        )
+                        continue
+                    tool = tools_by_name.get(name)
                     content = (
-                        f"Tool not found: {call['name']}"
+                        f"Tool not found: {name}"
                         if tool is None
-                        else str(await _invoke_tool(tool, call.get("args", {})))
+                        else str(await _invoke_tool(tool, args))
                     )
                     if tool is not None:
                         executed_tool_calls += 1
                     messages.append(
                         ToolMessage(
                             content=content,
-                            tool_call_id=call.get("id") or call["name"],
-                            name=call["name"],
+                            tool_call_id=tool_call_id,
+                            name=name,
                         )
                     )
 
