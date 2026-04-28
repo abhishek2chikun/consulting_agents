@@ -51,6 +51,7 @@ def make_profile(
 
 
 def test_new_profile_stage_and_consulting_profile_fields_default_empty_or_none() -> None:
+    worker = WorkerSpec(slug="x", prompt_file="x.md")
     stage = ProfileStage(
         slug="stage1_foundation",
         node_name="stage1_foundation",
@@ -59,6 +60,7 @@ def test_new_profile_stage_and_consulting_profile_fields_default_empty_or_none()
     )
     profile = make_profile()
 
+    assert worker.required_skills == ()
     assert stage.required_skills == ()
     assert stage.workers == ()
     assert stage.max_retries is None
