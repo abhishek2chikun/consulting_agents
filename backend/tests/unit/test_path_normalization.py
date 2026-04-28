@@ -35,3 +35,16 @@ def test_artifact_lookup_reads_alias_and_preserves_original_path() -> None:
 
     assert path == "stage3_risk/findings.md"
     assert content == "risk content"
+
+
+def test_artifact_lookup_prefers_exact_path_over_alias() -> None:
+    path, content = _get_artifact_by_path(
+        {
+            "stage3_risk/findings.md": "stale alias content",
+            "stage_3_risk/risk.md": "fresh exact content",
+        },
+        "stage_3_risk/risk.md",
+    )
+
+    assert path == "stage_3_risk/risk.md"
+    assert content == "fresh exact content"

@@ -26,10 +26,12 @@ def _default_profile() -> ConsultingProfile:
 
 
 def _get_artifact_by_path(artifacts: dict[str, str], expected_path: str) -> tuple[str, str]:
-    aliases = normalize_artifact_path(expected_path)
-    for path, content in artifacts.items():
-        if path in aliases:
-            return path, content
+    if expected_path in artifacts:
+        return expected_path, artifacts[expected_path]
+
+    for path in sorted(normalize_artifact_path(expected_path) - {expected_path}):
+        if path in artifacts:
+            return path, artifacts[path]
     return expected_path, f"(missing {expected_path})"
 
 
