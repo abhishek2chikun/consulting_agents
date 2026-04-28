@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from app.core.db import AsyncSessionLocal
 from app.models import SINGLETON_USER_ID, Event, Run, RunStatus
@@ -51,6 +51,12 @@ async def _load_events(*run_ids: Run) -> dict[str, list[Event]]:
         for event in rows:
             grouped[str(event.run_id)].append(event)
         return grouped
+
+
+async def _cleanup_run(run: Run) -> None:
+    async with AsyncSessionLocal() as session:
+        await session.execute(delete(Run).where(Run.id == run.id))
+        await session.commit()
 
 
 def _assert_single_failure_event(events: Iterable[Event]) -> None:
@@ -129,17 +135,19 @@ async def test_backfill_stale_runs_dry_run_reports_count_without_mutating_db(
         status=RunStatus.running,
         created_at=datetime.now(UTC) - timedelta(hours=27),
     )
+    try:
+        updated = await backfill_stale_runs(dry_run=True)
+        exit_code = await main_async(["--dry-run"])
+        captured = capsys.readouterr()
 
-    updated = await backfill_stale_runs(dry_run=True)
-    exit_code = await main_async(["--dry-run"])
-    captured = capsys.readouterr()
+        persisted = (await _load_runs(stale_run))[str(stale_run.id)]
+        events = (await _load_events(stale_run))[str(stale_run.id)]
 
-    persisted = (await _load_runs(stale_run))[str(stale_run.id)]
-    events = (await _load_events(stale_run))[str(stale_run.id)]
-
-    assert updated >= 1
-    assert exit_code == 0
-    assert f"{updated} stale running runs would be backfilled" in captured.out
-    assert persisted.status == RunStatus.running
-    assert persisted.completed_at is None
-    assert events == []
+        assert updated >= 1
+        assert exit_code == 0
+        assert f"{updated} stale running runs would be backfilled" in captured.out
+        assert persisted.status == RunStatus.running
+        assert persisted.completed_at is None
+        assert events == []
+    finally:
+        await _cleanup_run(stale_run)
