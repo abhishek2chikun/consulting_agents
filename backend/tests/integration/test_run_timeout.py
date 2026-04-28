@@ -11,6 +11,7 @@ from app.agents.market_entry.profile import MARKET_ENTRY_PROFILE
 from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
 from app.models import SINGLETON_USER_ID, Artifact, Event, Run, RunStatus
+from app.workers import run_worker
 from app.workers.run_worker import continue_after_framing
 
 
@@ -52,6 +53,11 @@ async def test_continue_after_framing_fails_when_timeout_budget_is_exceeded(
 
     def factory(_role: str) -> object:
         return BlockingStructuredModel()
+
+    def forbidden_timeout(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("timeout must be enforced by the heartbeat monitor")
+
+    monkeypatch.setattr(run_worker.asyncio, "timeout", forbidden_timeout)
 
     try:
         await asyncio.wait_for(
