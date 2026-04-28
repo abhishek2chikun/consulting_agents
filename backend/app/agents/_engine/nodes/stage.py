@@ -154,6 +154,21 @@ def _prefixed_worker_path(stage_slug: str, worker_slug: str, path: str) -> str:
     return f"{prefix}{clean}"
 
 
+def _worker_fanout_tools(tools: list[object]) -> list[object]:
+    return [tool for tool in tools if _tool_name(tool) != "write_artifact"]
+
+
+def _selected_workers(stage: ProfileStage, state: RunState) -> tuple[WorkerSpec, ...]:
+    target_agents = set(state.get("target_agents") or [])
+    if not target_agents:
+        return stage.workers
+    return tuple(
+        worker
+        for worker in stage.workers
+        if worker.slug in target_agents or f"{stage.slug}.{worker.slug}" in target_agents
+    )
+
+
 async def _run_react_stage(
     *,
     agent_id: str,
@@ -362,6 +377,8 @@ async def _run_worker_fanout(
     tools: list[object],
 ) -> tuple[StageOutput, dict[str, dict[str, Any]], dict[str, str]]:
     semaphore = asyncio.Semaphore(get_settings().worker_concurrency)
+    worker_tools = _worker_fanout_tools(tools)
+    workers = _selected_workers(stage, state)
 
     async def run_worker(worker: WorkerSpec) -> tuple[WorkerSpec, StageOutput]:
         async with semaphore:
@@ -374,11 +391,11 @@ async def _run_worker_fanout(
                 ),
                 state=state,
                 model=model,
-                tools=tools,
+                tools=worker_tools,
             )
             return worker, result
 
-    worker_results = await asyncio.gather(*(run_worker(worker) for worker in stage.workers))
+    worker_results = await asyncio.gather(*(run_worker(worker) for worker in workers))
     merged = _merge_worker_outputs(stage_slug=stage.slug, worker_results=list(worker_results))
     compact = {
         worker.slug: {
@@ -477,7 +494,9 @@ def make_stage_node(
         }
         if worker_outputs is not None:
             prior_worker_outputs = dict(state.get("worker_outputs", {}) or {})
-            prior_worker_outputs[stage_slug] = worker_outputs
+            stage_worker_outputs = dict(prior_worker_outputs.get(stage_slug, {}) or {})
+            stage_worker_outputs.update(worker_outputs)
+            prior_worker_outputs[stage_slug] = stage_worker_outputs
             updates["worker_outputs"] = prior_worker_outputs
 
         return updates
