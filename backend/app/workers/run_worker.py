@@ -223,6 +223,9 @@ async def continue_after_framing(
         await _mark_cancelled(run_id)
         return
     except TimeoutError:
+        if await _run_is_cancelling(run_id):
+            await _mark_cancelled(run_id)
+            return
         await _mark_failed(
             run_id,
             reason=f"timeout: exceeded {settings.run_timeout_seconds} s budget",
