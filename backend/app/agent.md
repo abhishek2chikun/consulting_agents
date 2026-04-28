@@ -1,20 +1,21 @@
 # app — agent.md
 
 ## Status
-**Active (M4.7 in progress).**
-Application factory now mounts health/settings/ping/tasks/documents
-routers plus search-health diagnostics (`GET /health/search`).
-Submodules include ingestion (`docling -> chunk -> embed`) and
-agent tools (`rag_search` + search-provider adapters).
+**Active (V1.6).**
+Application factory now mounts health/settings/ping/tasks/documents/runs
+routers, runs a lifespan startup sweep for stale running runs, and hosts
+the shared consulting runtime used by `market_entry`, `pricing`, and
+`profitability`.
 
 ---
 
 ## Purpose
 
 Top-level package for the FastAPI backend. Hosts the application factory
-(`create_app`) which wires the routers exposed by submodules. Eventually
-adds middleware, lifespan events, and dependency providers for
-downstream submodules (websockets, agent runtime, retrieval).
+(`create_app`) which wires the routers exposed by submodules, runs
+startup recovery for stale `running` rows, and exposes the run lifecycle
+API (`/runs`, SSE stream, artifact/evidence access) that fronts the
+shared consulting runtime.
 
 ---
 
@@ -41,13 +42,26 @@ app/
     ping.py
     tasks.py
     documents.py
-  agents/        # LLM provider registry + chat model factory (see app/agents/agent.md)
+    runs.py
+  agents/        # LLM registry + shared consulting runtime (see app/agents/agent.md)
     llm.py
+    _engine/      # shared consulting runtime (skills, workers, recovery)
+    budget.py     # per-run token/cost accounting callbacks
+    ma/           # M&A stub runtime
+    market_entry/
+    pricing/
+    profitability/
     tools/
       __init__.py
+      cite.py
+      fetch_url.py
       rag_search.py
+      read_doc.py
+      web_search.py
+      write_artifact.py
       providers/
         base.py
+        duckduckgo.py
         tavily.py
         exa.py
         perplexity.py
@@ -57,6 +71,8 @@ app/
     chunker.py
     embedder.py
     worker.py
+  workers/       # background run execution / heartbeat / timeout loop
+    run_worker.py
 ```
 
 ### Corresponding Tests
@@ -64,6 +80,9 @@ app/
 backend/tests/test_health.py
 backend/tests/integration/test_settings_api.py    # exercises the mounted /settings router
 backend/tests/integration/test_health_search.py    # exercises /health/search diagnostics
+backend/tests/integration/test_run_lifecycle.py
+backend/tests/integration/test_run_recovery.py
+backend/tests/integration/test_run_timeout.py
 ```
 
 ---
@@ -80,6 +99,10 @@ from app.main import create_app, app  # FastAPI factory + module-level instance
 - `app.api.ping.router` (prefix `/ping`)
 - `app.api.tasks.router` (prefix `/tasks`)
 - `app.api.documents.router` (prefix `/documents`)
+- `app.api.runs.router` (prefix `/runs`)
+
+It also runs `sweep_stale_runs()` during lifespan startup so stale
+`running` rows are marked failed before the app begins serving traffic.
 
 ---
 
@@ -93,12 +116,15 @@ from app.main import create_app, app  # FastAPI factory + module-level instance
 | `app.api.ping` | `router` (mounted at `/ping`) |
 | `app.api.tasks` | `router` (mounted at `/tasks`) |
 | `app.api.documents` | `router` (mounted at `/documents`) |
+| `app.api.runs` | `router` (mounted at `/runs`) |
+| `app.agents._engine.recovery` | stale-run startup sweep |
 
 | Consumed by | What |
 |---|---|
 | `tests.test_health` | exercises `/health` via `create_app()` |
 | `tests.integration.test_settings_api` | exercises `/settings/*` via `create_app()` |
 | `tests.integration.test_health_search` | exercises `/health/search` via `create_app()` |
+| `tests.integration.test_run_recovery` | verifies startup recovery wiring |
 | `uvicorn` | serves `app.main:app` |
 
 ---
@@ -111,19 +137,22 @@ Reads settings via `app.core.config.get_settings()`. No module-local config.
 
 ## Current Progress
 
-- `create_app()` factory implemented and mounting all current routers.
+- `create_app()` factory implemented and mounting all current routers,
+  including `/runs`.
 - `/health` returns `{"status": "ok", "env": settings.app_env}`.
 - `/health/search` probes configured search provider and returns top-3 titles.
-- Ingestion stack (M3.4-M3.6) and RAG tooling (M3.7) are now present.
-- Search-provider adapters (M4.1-M4.4) and frontend test-search wiring (M4.7) landed.
+- Lifespan startup now runs stale-run recovery based on heartbeat /
+  started-at / created-at liveness.
+- Ingestion stack (M3.4-M3.6), agent tooling, and the shared consulting
+  runtime are now present.
 
 ## Next Steps
-1. Add run lifecycle routers under `api/` (`runs.py`, SSE stream endpoints).
-2. Add lifespan handler in `create_app()` for startup/shutdown (DB
-   pool, agent runtime warmup).
-3. When the lifespan handler lands, move the module-level
-   `app = create_app()` to a dedicated `app/asgi.py` to avoid
-   import-time side effects (DB pool init on every `import app.main`).
+1. Extend startup/lifespan work only when new recovery or warmup duties
+   have a clear runtime benefit.
+2. Keep `/runs` and SSE DTOs aligned with the frontend live-run views as
+   worker child-node rendering evolves.
+3. Revisit the import-time `app = create_app()` pattern only if startup
+   side effects become a measurable problem in deployment.
 
 ## Known Issues / Blockers
 - None currently.

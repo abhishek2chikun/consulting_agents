@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy import select
 
 from app.agents._engine.profile import ConsultingProfile
+from app.agents._engine.skills import inject_skills
 from app.agents._engine.state import RunState
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
@@ -39,7 +40,7 @@ def build_framing_node(
     """Construct an async LangGraph node that runs the framing step."""
 
     profile = profile or _default_profile()
-    system_prompt = profile.load_prompt("framing")
+    system_prompt = inject_skills(profile.load_prompt("framing"), profile.framing_skills)
 
     async def framing_node(state: RunState) -> RunState:
         goal = state.get("goal", "")

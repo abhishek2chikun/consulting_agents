@@ -50,11 +50,13 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
-from pydantic import Field, ValidationError
+from pydantic import Field, SecretStr, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.services.settings_service import SettingsService
+
+PRODUCTION_MODEL_MARKER = "__production_model__"
 
 _BEDROCK_MODEL_MAP: dict[str, str] = {
     "claude-haiku-4-5-20251001": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -236,10 +238,7 @@ class _BedrockBearerChatModel(BaseChatModel):
         return {"model": self.model, "region_name": self.region_name}
 
     def _endpoint(self) -> str:
-        return (
-            f"https://bedrock-runtime.{self.region_name}.amazonaws.com"
-            f"/model/{self.model}/invoke"
-        )
+        return f"https://bedrock-runtime.{self.region_name}.amazonaws.com/model/{self.model}/invoke"
 
     def _payload(self, messages: list[BaseMessage], **kwargs: Any) -> dict[str, Any]:
         system_parts: list[str] = []
@@ -296,7 +295,7 @@ class _BedrockBearerChatModel(BaseChatModel):
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
 
-    def _generate(
+    def _generate(  # type: ignore[override]
         self,
         messages: list[BaseMessage],
         stop: list[str] | None = None,
@@ -318,7 +317,7 @@ class _BedrockBearerChatModel(BaseChatModel):
             ) from exc
         return self._chat_result(response.json())
 
-    async def _agenerate(
+    async def _agenerate(  # type: ignore[override]
         self,
         messages: list[BaseMessage],
         stop: list[str] | None = None,
@@ -344,7 +343,9 @@ class _BedrockBearerChatModel(BaseChatModel):
             ) from exc
         return self._chat_result(response.json())
 
-    def with_structured_output(self, schema: Any, **_: Any) -> _BedrockBearerStructuredOutput:
+    def with_structured_output(  # type: ignore[override]
+        self, schema: Any, **_: Any
+    ) -> _BedrockBearerStructuredOutput:
         return _BedrockBearerStructuredOutput(self, schema)
 
 
@@ -354,15 +355,14 @@ def _aws_factory(model: str, key: str | None) -> BaseChatModel:
     Credential resolution order (highest priority first):
 
     1. ``AWS_ACCESS_KEY_ID`` + ``AWS_SECRET_ACCESS_KEY`` already in env
-       → boto3's default credential chain handles it automatically.
+        → boto3's default credential chain handles it automatically.
     2. ``BEDROCK_API_KEY`` in env — if it is an AWS credential bundle,
-       blob produced by the AWS toolkit.  The parsed access key + secret
-       are injected into ``os.environ`` so boto3's default chain picks them
-       up on the same call.
+        blob produced by the AWS toolkit. The parsed access key + secret
+        are passed directly to ``ChatBedrockConverse`` for this call only.
     3. ``BEDROCK_API_KEY`` as an API key → direct Bedrock Runtime HTTP with
-       ``Authorization: Bearer ...``.
+        ``Authorization: Bearer ...``.
     4. Neither → ChatBedrockConverse is created without explicit creds;
-       boto3 will try instance-profile / SSO / etc.
+        boto3 will try instance-profile / SSO / etc.
 
     ``AWS_REGION`` sets the region (default ``us-east-1``).
     The ``key`` argument (from the encrypted provider_keys table) is used
@@ -376,25 +376,30 @@ def _aws_factory(model: str, key: str | None) -> BaseChatModel:
     max_tokens = settings.llm_max_tokens
 
     # If standard IAM env vars are already present, let boto3 use them.
-    if not os.environ.get("AWS_ACCESS_KEY_ID"):
-        raw_key = _bedrock_api_key(key)
-        if raw_key:
-            credentials = _aws_credentials_from_bedrock_key(raw_key)
-            if credentials is not None:
-                access_key_id, secret_access_key = credentials
-                os.environ["AWS_ACCESS_KEY_ID"] = access_key_id
-                os.environ["AWS_SECRET_ACCESS_KEY"] = secret_access_key
-            else:
-                return _BedrockBearerChatModel(
-                    model=bedrock_model,
-                    api_key=raw_key,
-                    region_name=region,
-                    timeout_sec=timeout_sec,
-                    max_tokens=max_tokens,
-                )
+    if os.environ.get("AWS_ACCESS_KEY_ID"):
+        return ChatBedrockConverse(model=bedrock_model, region_name=region)
 
-    return ChatBedrockConverse(model=bedrock_model, region_name=region)  # type: ignore[call-arg]
+    raw_key = _bedrock_api_key(key)
+    if raw_key:
+        credentials = _aws_credentials_from_bedrock_key(raw_key)
+        if credentials is not None:
+            access_key_id, secret_access_key = credentials
+            return ChatBedrockConverse(
+                model=bedrock_model,
+                region_name=region,
+                aws_access_key_id=SecretStr(access_key_id),
+                aws_secret_access_key=SecretStr(secret_access_key),
+            )
 
+        return _BedrockBearerChatModel(
+            model=bedrock_model,
+            api_key=raw_key,
+            region_name=region,
+            timeout_sec=timeout_sec,
+            max_tokens=max_tokens,
+        )
+
+    return ChatBedrockConverse(model=bedrock_model, region_name=region)
 
 
 PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
@@ -484,7 +489,9 @@ async def get_chat_model(role: str, *, session: AsyncSession) -> BaseChatModel:
     if spec["requires_key"] and not key:
         raise ValueError(f"No API key configured for provider {provider!r}")
 
-    return spec["factory"](model, key)
+    resolved = spec["factory"](model, key)
+    setattr(resolved, PRODUCTION_MODEL_MARKER, True)
+    return resolved
 
 
 # Maps the LangChain chat-model class name back to the registry provider key.
@@ -515,6 +522,7 @@ def provider_name_for(model: BaseChatModel) -> str:
 __all__ = [
     "DEFAULT_PROVIDER",
     "LLM_PROVIDERS",
+    "PRODUCTION_MODEL_MARKER",
     "PROVIDER_REGISTRY",
     "ProviderSpec",
     "get_chat_model",

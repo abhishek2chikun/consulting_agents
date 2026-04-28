@@ -21,18 +21,13 @@ import { SourcesSidebar } from "@/components/SourcesSidebar";
 import { UsagePanel } from "@/components/UsagePanel";
 import { Button } from "@/components/ui/button";
 import { getRun, getRunArtifact, submitRunAnswers, cancelRun } from "@/lib/api";
+import { RUN_LIFECYCLE_EVENT_TYPES } from "@/lib/runEvents";
 import { useEventStream } from "@/lib/sse";
 import type { QuestionnaireSchema, RunInfoResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const QUESTIONNAIRE_PATH = "framing/questionnaire.json";
 const REPORT_PATH = "final_report.md";
-const RUN_LIFECYCLE_EVENTS = new Set([
-  "run_completed",
-  "run_failed",
-  "run_cancelled",
-  "cancel_ack",
-]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 function errorMessage(err: unknown): string {
@@ -138,7 +133,7 @@ export default function RunPage() {
   const latestLifecycleEventId = useMemo(() => {
     let latest = 0;
     for (const evt of events) {
-      if (RUN_LIFECYCLE_EVENTS.has(evt.type) && evt.id > latest) latest = evt.id;
+        if (RUN_LIFECYCLE_EVENT_TYPES.has(evt.type) && evt.id > latest) latest = evt.id;
     }
     return latest;
   }, [events]);

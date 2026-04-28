@@ -17,6 +17,7 @@ const TYPE_TONE: Record<string, string> = {
   usage_update: "text-violet-300 bg-violet-500/10 ring-violet-500/20",
   run_completed: "text-emerald-300 bg-emerald-500/10 ring-emerald-500/20",
   run_failed: "text-rose-300 bg-rose-500/10 ring-rose-500/20",
+  "system.run_failed": "text-rose-300 bg-rose-500/10 ring-rose-500/20",
   run_cancelled: "text-stone-300 bg-stone-500/10 ring-stone-500/20",
   cancel_ack: "text-stone-300 bg-stone-500/10 ring-stone-500/20",
 };

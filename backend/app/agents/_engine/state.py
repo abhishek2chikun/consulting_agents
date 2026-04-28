@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 
 class FramingBrief(TypedDict):
@@ -36,6 +36,7 @@ class RunState(TypedDict, total=False):
     evidence: list[EvidenceRef]
     stage_attempts: dict[str, int]
     gate_verdicts: dict[str, GateVerdict]
+    worker_outputs: dict[str, dict[str, Any]]
     target_agents: list[str] | None
     cancelled: bool
 

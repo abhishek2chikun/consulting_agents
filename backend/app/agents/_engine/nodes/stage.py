@@ -8,23 +8,27 @@ produce a list of artifact files. Each file is persisted via
 ``write_artifact`` (which also publishes ``artifact_update`` events)
 and returned in the merged ``RunState.artifacts`` map.
 
-The ``tools`` parameter is accepted for forward-compatibility with a
-real DeepAgent ReAct loop in M7+. For V1 we use structured output so
-the workflow is deterministic and testable with a scripted model.
+    When tools are provided, the stage first runs a bounded ReAct loop and
+    then asks the model to produce the same structured output used by the
+    no-tools fallback path.
 """
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Literal
+from typing import Any, Literal, cast
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.agents._engine.profile import ConsultingProfile
+from app.agents._engine.profile import ConsultingProfile, ProfileStage, WorkerSpec
+from app.agents._engine.skills import inject_skills
 from app.agents._engine.state import EvidenceRef, RunState
+from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
 from app.models import Artifact, Evidence, EvidenceKind
@@ -81,11 +85,362 @@ def _format_existing(artifacts: dict[str, str]) -> str:
     return "\n\n".join(lines)
 
 
+def _stage_required_skills(profile: ConsultingProfile, stage_slug: str) -> tuple[str, ...]:
+    for stage in profile.stages:
+        if stage.slug == stage_slug or stage.node_name == stage_slug:
+            return stage.required_skills
+    return ()
+
+
+def _profile_stage(profile: ConsultingProfile, stage_slug: str) -> ProfileStage | None:
+    for stage in profile.stages:
+        if stage.slug == stage_slug or stage.node_name == stage_slug:
+            return stage
+    return None
+
+
+def _tool_name(tool: object) -> str | None:
+    name = getattr(tool, "name", None)
+    return name if isinstance(name, str) else None
+
+
+def _safe_bind_tools(model: object, tools: list[object]) -> object:
+    if not hasattr(model, "bind_tools"):
+        return model
+    try:
+        return cast(Any, model).bind_tools(tools)
+    except NotImplementedError:
+        return model
+
+
+def _normalize_tool_call(call: object, index: int) -> tuple[str | None, str, object]:
+    if isinstance(call, dict):
+        raw_name = call.get("name")
+        raw_id = call.get("id")
+        args = call.get("args") or {}
+    else:
+        raw_name = getattr(call, "name", None)
+        raw_id = getattr(call, "id", None)
+        args = getattr(call, "args", None) or {}
+
+    name = raw_name if isinstance(raw_name, str) and raw_name else None
+    tool_call_id = raw_id if isinstance(raw_id, str) and raw_id else f"malformed_tool_call_{index}"
+    return name, tool_call_id, args
+
+
+async def _invoke_tool(tool: object, args: object) -> object:
+    if hasattr(tool, "ainvoke"):
+        return await cast(Any, tool).ainvoke(args)
+    if hasattr(tool, "invoke"):
+        result = cast(Any, tool).invoke(args)
+    elif callable(tool):
+        result = tool(args)
+    else:
+        raise TypeError(f"Tool {tool!r} is not invokable")
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+def _prefixed_worker_path(stage_slug: str, worker_slug: str, path: str) -> str:
+    prefix = f"{stage_slug}/{worker_slug}/"
+    if not path or path.startswith("/"):
+        raise ValueError(f"invalid worker artifact path: {path!r}")
+    clean = path
+    if clean.startswith(prefix):
+        remainder = clean.removeprefix(prefix)
+        if not remainder or ".." in remainder.split("/"):
+            raise ValueError(f"invalid worker artifact path: {path!r}")
+        return clean
+    if clean.startswith(f"{stage_slug}/"):
+        clean = clean.removeprefix(f"{stage_slug}/")
+    if clean.startswith(f"{worker_slug}/"):
+        clean = clean.removeprefix(f"{worker_slug}/")
+    if not clean or ".." in clean.split("/"):
+        raise ValueError(f"invalid worker artifact path: {path!r}")
+    return f"{prefix}{clean}"
+
+
+def _worker_fanout_tools(tools: list[object]) -> list[object]:
+    return [tool for tool in tools if _tool_name(tool) != "write_artifact"]
+
+
+def _selected_workers(stage: ProfileStage, state: RunState) -> tuple[WorkerSpec, ...]:
+    target_agents = set(state.get("target_agents") or [])
+    if not target_agents:
+        return stage.workers
+    return tuple(
+        worker
+        for worker in stage.workers
+        if worker.slug in target_agents or f"{stage.slug}.{worker.slug}" in target_agents
+    )
+
+
+async def _run_react_stage(
+    *,
+    agent_id: str,
+    system_prompt: str,
+    state: RunState,
+    model: object,
+    tools: list[object],
+) -> tuple[StageOutput, int]:
+    framing = state.get("framing", {}) or {}
+    target_agents = state.get("target_agents") or []
+    existing = dict(state.get("artifacts", {}) or {})
+
+    scope_clause = (
+        f"Reiterate pass — focus only on these sub-agents: {target_agents}.\n"
+        if target_agents
+        else "First pass — cover the full stage scope.\n"
+    )
+
+    user_msg = (
+        f"stage: {agent_id}\n"
+        f"framing: {framing}\n"
+        f"{scope_clause}"
+        f"existing_artifacts:\n{_format_existing(existing)}\n\n"
+        "Produce a StageOutput object with artifacts (each citing "
+        "evidence via [^src_id] tokens) and a matching evidence list. "
+        "Keep the response compact enough for one provider call: at most "
+        "three artifacts, 400-900 words per artifact, and only the most "
+        "decision-relevant evidence rows. Return valid JSON only."
+    )
+
+    messages: list[BaseMessage] = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_msg),
+    ]
+    executed_tool_calls = 0
+
+    if tools:
+        loop_model = _safe_bind_tools(model, tools)
+        tools_by_name = {name: tool for tool in tools if (name := _tool_name(tool))}
+        for _ in range(get_settings().react_max_iterations):
+            ai = await cast(Any, loop_model).ainvoke(messages)
+            if not isinstance(ai, AIMessage):
+                ai = AIMessage(content=getattr(ai, "content", str(ai)))
+            messages.append(ai)
+            tool_calls = ai.tool_calls or []
+            if not tool_calls:
+                break
+            for index, call in enumerate(tool_calls):
+                name, tool_call_id, args = _normalize_tool_call(call, index)
+                if name is None:
+                    messages.append(
+                        ToolMessage(
+                            content="Malformed tool call: missing tool name",
+                            tool_call_id=tool_call_id,
+                        )
+                    )
+                    continue
+                tool = tools_by_name.get(name)
+                if tool is None:
+                    content = f"Tool not found: {name}"
+                else:
+                    executed_tool_calls += 1
+                    try:
+                        content = str(await _invoke_tool(tool, args))
+                    except Exception as exc:
+                        content = f"Tool execution failed for {name}: {type(exc).__name__}: {exc}"
+                messages.append(
+                    ToolMessage(
+                        content=content,
+                        tool_call_id=tool_call_id,
+                        name=name,
+                    )
+                )
+
+    structured_messages = messages
+    if tools:
+        structured_messages = [
+            *messages,
+            HumanMessage(content="Now produce StageOutput"),
+        ]
+
+    structured = model.with_structured_output(StageOutput)  # type: ignore[attr-defined]
+    result = await structured.ainvoke(structured_messages)
+    if not isinstance(result, StageOutput):
+        result = StageOutput.model_validate(result)
+    return result, executed_tool_calls
+
+
+async def _persist_stage_output(
+    *,
+    run_uuid: uuid.UUID,
+    agent_id: str,
+    result: StageOutput,
+    merged: dict[str, str],
+    artifact_agents: dict[str, str] | None = None,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        for af in result.artifacts:
+            merged[af.path] = af.content
+            row = (
+                await session.execute(
+                    select(Artifact).where(
+                        Artifact.run_id == run_uuid,
+                        Artifact.path == af.path,
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                session.add(
+                    Artifact(
+                        run_id=run_uuid,
+                        path=af.path,
+                        kind=af.kind,
+                        content=af.content,
+                    )
+                )
+            else:
+                row.content = af.content
+                row.kind = af.kind
+
+        for ev in result.evidence:
+            exists = (
+                await session.execute(
+                    select(Evidence).where(
+                        Evidence.run_id == run_uuid,
+                        Evidence.src_id == ev.src_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if exists is None:
+                session.add(
+                    Evidence(
+                        run_id=run_uuid,
+                        src_id=ev.src_id,
+                        title=ev.title,
+                        url=ev.url,
+                        snippet=ev.snippet or ev.title,
+                        kind=EvidenceKind(ev.kind),
+                        provider=ev.provider,
+                    )
+                )
+        await session.commit()
+
+    # Emit artifact_update events after commit so subscribers can safely fetch
+    # the persisted content.
+    for af in result.artifacts:
+        await publish(
+            run_uuid,
+            "artifact_update",
+            {"path": af.path},
+            agent=(artifact_agents or {}).get(af.path, agent_id),
+        )
+
+
+def _append_evidence_refs(state: RunState, result: StageOutput) -> list[EvidenceRef]:
+    evidence_state = list(state.get("evidence", []) or [])
+    existing_ids = {e["src_id"] for e in evidence_state}
+    for ev in result.evidence:
+        if ev.src_id not in existing_ids:
+            ref: EvidenceRef = {"src_id": ev.src_id, "title": ev.title}
+            if ev.url:
+                ref["url"] = ev.url
+            evidence_state.append(ref)
+            existing_ids.add(ev.src_id)
+    return evidence_state
+
+
+def _merge_worker_outputs(
+    *,
+    stage_slug: str,
+    worker_results: list[tuple[WorkerSpec, StageOutput]],
+) -> StageOutput:
+    artifacts: list[ArtifactFile] = []
+    evidence: list[EvidenceCitation] = []
+    summaries: list[str] = []
+    seen_evidence: set[str] = set()
+
+    for worker, result in worker_results:
+        if result.summary:
+            summaries.append(f"{worker.slug}: {result.summary}")
+        for artifact in result.artifacts:
+            artifacts.append(
+                artifact.model_copy(
+                    update={"path": _prefixed_worker_path(stage_slug, worker.slug, artifact.path)}
+                )
+            )
+        for ev in result.evidence:
+            if ev.src_id in seen_evidence:
+                continue
+            evidence.append(ev)
+            seen_evidence.add(ev.src_id)
+
+    return StageOutput(
+        artifacts=artifacts,
+        evidence=evidence,
+        summary="\n".join(summaries),
+    )
+
+
+def _worker_output_payload(
+    stage_slug: str, worker: WorkerSpec, result: StageOutput
+) -> dict[str, Any]:
+    return {
+        "artifacts": [
+            artifact.model_copy(
+                update={"path": _prefixed_worker_path(stage_slug, worker.slug, artifact.path)}
+            ).model_dump()
+            for artifact in result.artifacts
+        ],
+        "evidence": [evidence.model_dump() for evidence in result.evidence],
+        "summary": result.summary,
+    }
+
+
+async def _run_worker_fanout(
+    *,
+    stage: ProfileStage,
+    profile: ConsultingProfile,
+    state: RunState,
+    model: object,
+    tools: list[object],
+) -> tuple[StageOutput, dict[str, dict[str, Any]], dict[str, str], dict[str, int]]:
+    semaphore = asyncio.Semaphore(get_settings().worker_concurrency)
+    worker_tools = _worker_fanout_tools(tools)
+    workers = _selected_workers(stage, state)
+
+    async def run_worker(worker: WorkerSpec) -> tuple[WorkerSpec, StageOutput, int]:
+        async with semaphore:
+            agent_id = f"{stage.slug}.{worker.slug}"
+            result, executed_tool_calls = await _run_react_stage(
+                agent_id=agent_id,
+                system_prompt=inject_skills(
+                    profile.load_worker_prompt(stage.slug, worker.slug),
+                    stage.required_skills + worker.required_skills,
+                ),
+                state=state,
+                model=model,
+                tools=worker_tools,
+            )
+            return worker, result, executed_tool_calls
+
+    worker_results = await asyncio.gather(*(run_worker(worker) for worker in workers))
+    stage_outputs = [(worker, result) for worker, result, _ in worker_results]
+    merged = _merge_worker_outputs(stage_slug=stage.slug, worker_results=stage_outputs)
+    compact = {
+        worker.slug: _worker_output_payload(stage.slug, worker, result)
+        for worker, result, _ in worker_results
+    }
+    artifact_agents = {
+        _prefixed_worker_path(stage.slug, worker.slug, artifact.path): f"{stage.slug}.{worker.slug}"
+        for worker, result, _ in worker_results
+        for artifact in result.artifacts
+    }
+    worker_tool_counts = {
+        f"{stage.slug}.{worker.slug}": executed_tool_calls
+        for worker, _, executed_tool_calls in worker_results
+    }
+    return merged, compact, artifact_agents, worker_tool_counts
+
+
 def make_stage_node(
     stage_slug: str,
     *,
     model: object,
-    tools: list[object] | None = None,  # noqa: ARG001  # reserved for M7 DeepAgent wiring
+    tools: list[object] | None = None,
     profile: ConsultingProfile | None = None,
 ) -> Callable[[RunState], Awaitable[RunState]]:
     """Build an async LangGraph node for a stage.
@@ -95,97 +450,62 @@ def make_stage_node(
     """
 
     profile = profile or _default_profile()
-    system_prompt = profile.load_prompt(stage_slug)
+    stage = _profile_stage(profile, stage_slug)
+    system_prompt = inject_skills(
+        profile.load_prompt(stage_slug),
+        _stage_required_skills(profile, stage_slug),
+    )
+    available_tools = list(tools or [])
 
     async def stage_node(state: RunState) -> RunState:
-        framing = state.get("framing", {}) or {}
-        target_agents = state.get("target_agents") or []
         existing = dict(state.get("artifacts", {}) or {})
-
-        scope_clause = (
-            f"Reiterate pass — focus only on these sub-agents: {target_agents}.\n"
-            if target_agents
-            else "First pass — cover the full stage scope.\n"
-        )
-
-        user_msg = (
-            f"stage: {stage_slug}\n"
-            f"framing: {framing}\n"
-            f"{scope_clause}"
-            f"existing_artifacts:\n{_format_existing(existing)}\n\n"
-            "Produce a StageOutput object with artifacts (each citing "
-            "evidence via [^src_id] tokens) and a matching evidence list. "
-            "Keep the response compact enough for one provider call: at most "
-            "three artifacts, 400-900 words per artifact, and only the most "
-            "decision-relevant evidence rows. Return valid JSON only."
-        )
-
-        structured = model.with_structured_output(StageOutput)  # type: ignore[attr-defined]
-        result = await structured.ainvoke(
-            [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)]
-        )
-        if not isinstance(result, StageOutput):
-            result = StageOutput.model_validate(result)
-
         run_uuid = uuid.UUID(state["run_id"])
         merged = dict(existing)
 
-        async with AsyncSessionLocal() as session:
-            for af in result.artifacts:
-                merged[af.path] = af.content
-                row = (
-                    await session.execute(
-                        select(Artifact).where(
-                            Artifact.run_id == run_uuid,
-                            Artifact.path == af.path,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if row is None:
-                    session.add(
-                        Artifact(
-                            run_id=run_uuid,
-                            path=af.path,
-                            kind=af.kind,
-                            content=af.content,
-                        )
-                    )
-                else:
-                    row.content = af.content
-                    row.kind = af.kind
+        worker_outputs: dict[str, dict[str, Any]] | None = None
+        artifact_agents: dict[str, str] | None = None
+        worker_tool_counts: dict[str, int] | None = None
+        executed_tool_calls = 0
+        if stage and stage.workers:
+            result, worker_outputs, artifact_agents, worker_tool_counts = await _run_worker_fanout(
+                stage=stage,
+                profile=profile,
+                state=state,
+                model=model,
+                tools=available_tools,
+            )
+        else:
+            result, executed_tool_calls = await _run_react_stage(
+                agent_id=stage_slug,
+                system_prompt=system_prompt,
+                state=state,
+                model=model,
+                tools=available_tools,
+            )
 
-            for ev in result.evidence:
-                exists = (
-                    await session.execute(
-                        select(Evidence).where(
-                            Evidence.run_id == run_uuid,
-                            Evidence.src_id == ev.src_id,
-                        )
-                    )
-                ).scalar_one_or_none()
-                if exists is None:
-                    session.add(
-                        Evidence(
-                            run_id=run_uuid,
-                            src_id=ev.src_id,
-                            title=ev.title,
-                            url=ev.url,
-                            snippet=ev.snippet or ev.title,
-                            kind=EvidenceKind(ev.kind),
-                            provider=ev.provider,
-                        )
-                    )
-            await session.commit()
-
-        # Emit artifact_update events after commit so subscribers can
-        # safely fetch the persisted content.
-        for af in result.artifacts:
+        await _persist_stage_output(
+            run_uuid=run_uuid,
+            agent_id=stage_slug,
+            result=result,
+            merged=merged,
+            artifact_agents=artifact_agents,
+        )
+        if available_tools and not (stage and stage.workers) and executed_tool_calls == 0:
             await publish(
                 run_uuid,
-                "artifact_update",
-                {"path": af.path},
+                "agent_message",
+                {"text": f"{stage_slug}: produced StageOutput without tool use"},
                 agent=stage_slug,
             )
+        if worker_tool_counts is not None and available_tools:
+            for agent_id, worker_executed_tool_calls in worker_tool_counts.items():
+                if worker_executed_tool_calls == 0:
+                    await publish(
+                        run_uuid,
+                        "agent_message",
+                        {"text": f"{agent_id}: produced StageOutput without tool use"},
+                        agent=agent_id,
+                    )
         if result.summary:
             await publish(
                 run_uuid,
@@ -194,21 +514,22 @@ def make_stage_node(
                 agent=stage_slug,
             )
 
-        evidence_state = list(state.get("evidence", []) or [])
-        existing_ids = {e["src_id"] for e in evidence_state}
-        for ev in result.evidence:
-            if ev.src_id not in existing_ids:
-                ref: EvidenceRef = {"src_id": ev.src_id, "title": ev.title}
-                if ev.url:
-                    ref["url"] = ev.url
-                evidence_state.append(ref)
+        evidence_state = _append_evidence_refs(state, result)
 
-        return {
+        updates: RunState = {
             "artifacts": merged,
             "evidence": evidence_state,
             # Clear target_agents after the reiterate pass consumes it
             "target_agents": None,
         }
+        if worker_outputs is not None:
+            prior_worker_outputs = dict(state.get("worker_outputs", {}) or {})
+            stage_worker_outputs = dict(prior_worker_outputs.get(stage_slug, {}) or {})
+            stage_worker_outputs.update(worker_outputs)
+            prior_worker_outputs[stage_slug] = stage_worker_outputs
+            updates["worker_outputs"] = prior_worker_outputs
+
+        return updates
 
     return stage_node
 

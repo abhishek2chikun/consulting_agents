@@ -21,6 +21,7 @@ from app.models import (
     RunStatus,
 )
 from app.testing.fake_chat_model import FakeChatModel
+from tests.integration.v16_smoke_helpers import ScriptedResearchModel
 
 
 @pytest_asyncio.fixture
@@ -38,26 +39,27 @@ async def fresh_run() -> AsyncIterator[uuid.UUID]:
         yield run.id
 
 
-def _stage_payload(stage_slug: str, src_id: str) -> dict:
+def _stage_payload(agent_id: str, src_id: str) -> dict:
+    _stage_slug, worker_slug = agent_id.split(".", 1)
     return {
         "artifacts": [
             {
-                "path": f"{stage_slug}/findings.md",
-                "content": f"{stage_slug} finding [^{src_id}].",
+                "path": "findings.md",
+                "content": f"{agent_id} finding [^{src_id}].",
                 "kind": "markdown",
             }
         ],
         "evidence": [
             {
                 "src_id": src_id,
-                "title": f"{stage_slug} source",
+                "title": f"{worker_slug} source",
                 "url": f"https://example.com/{src_id}",
                 "snippet": "snippet",
                 "kind": "web",
                 "provider": "tavily",
             }
         ],
-        "summary": f"{stage_slug} done",
+        "summary": f"{agent_id} done",
     }
 
 
@@ -89,24 +91,32 @@ async def test_full_graph_runs_end_to_end_with_one_stage2_reiterate(
         "questionnaire": {"items": []},
     }
 
-    # Per-role scripted models. We need to pre-script every call the
-    # graph will make:
-    #   framing  : 1 structured call
-    #   research : stage1, stage2 (1st), stage2 (reiterate), stage3, stage4, stage5 -> 6 calls
-    #   reviewer : stage1, stage2 (reiterate), stage2 (advance), stage3,
-    #              stage4, stage5 -> 6 calls
-    #   synthesis: 1 plain text call
-    #   audit    : 1 plain text call
     framing_model = FakeChatModel(structured_responses=[framing_response])
-    research_model = FakeChatModel(
-        structured_responses=[
-            _stage_payload("stage1_foundation", "s1"),
-            _stage_payload("stage2_competitive", "s2"),
-            _stage_payload("stage2_competitive", "s2b"),
-            _stage_payload("stage3_risk", "s3"),
-            _stage_payload("stage4_demand", "s4"),
-            _stage_payload("stage5_strategy", "s5"),
-        ]
+    research_model = ScriptedResearchModel(
+        tool_calls_by_agent={},
+        structured_responses_by_agent={
+            "stage1_foundation.market_sizing": _stage_payload(
+                "stage1_foundation.market_sizing", "s1"
+            ),
+            "stage1_foundation.customer": _stage_payload("stage1_foundation.customer", "s2"),
+            "stage1_foundation.regulatory": _stage_payload("stage1_foundation.regulatory", "s3"),
+            "stage2_competitive.competitor": _stage_payload("stage2_competitive.competitor", "s4"),
+            "stage2_competitive.channel": _stage_payload("stage2_competitive.channel", "s5"),
+            "stage2_competitive.pricing": _stage_payload("stage2_competitive.pricing", "s6"),
+            "stage3_risk.risk": _stage_payload("stage3_risk.risk", "s7"),
+            "stage3_risk.regulatory_risk": _stage_payload("stage3_risk.regulatory_risk", "s8"),
+            "stage3_risk.operational_risk": _stage_payload("stage3_risk.operational_risk", "s9"),
+            "stage4_demand.demand_drivers": _stage_payload("stage4_demand.demand_drivers", "s10"),
+            "stage4_demand.willingness_to_pay": _stage_payload(
+                "stage4_demand.willingness_to_pay", "s11"
+            ),
+            "stage4_demand.segment_priority": _stage_payload(
+                "stage4_demand.segment_priority", "s12"
+            ),
+            "stage5_strategy.go_to_market": _stage_payload("stage5_strategy.go_to_market", "s13"),
+            "stage5_strategy.partnerships": _stage_payload("stage5_strategy.partnerships", "s14"),
+            "stage5_strategy.milestones": _stage_payload("stage5_strategy.milestones", "s15"),
+        },
     )
     reviewer_model = FakeChatModel(
         structured_responses=[
@@ -122,10 +132,10 @@ async def test_full_graph_runs_end_to_end_with_one_stage2_reiterate(
         "# Final Report\n\n"
         "## Executive Summary\n"
         "- Foundation finding [^s1].\n"
-        "- Competitive finding [^s2b].\n"
-        "- Risk finding [^s3].\n"
-        "- Demand finding [^s4].\n"
-        "- Strategy finding [^s5].\n"
+        "- Competitive finding [^s6].\n"
+        "- Risk finding [^s7].\n"
+        "- Demand finding [^s10].\n"
+        "- Strategy finding [^s13].\n"
     )
     synthesis_model = FakeChatModel(responses=[report_body])
     audit_model = FakeChatModel(
@@ -182,17 +192,17 @@ async def test_full_graph_runs_end_to_end_with_one_stage2_reiterate(
         run = await session.get(Run, fresh_run)
 
     assert "framing/questionnaire.json" in artifact_paths
-    assert "stage1_foundation/findings.md" in artifact_paths
-    assert "stage2_competitive/findings.md" in artifact_paths
-    assert "stage3_risk/findings.md" in artifact_paths
-    assert "stage4_demand/findings.md" in artifact_paths
-    assert "stage5_strategy/findings.md" in artifact_paths
+    assert any(path.startswith("stage1_foundation/") for path in artifact_paths)
+    assert any(path.startswith("stage2_competitive/") for path in artifact_paths)
+    assert any(path.startswith("stage3_risk/") for path in artifact_paths)
+    assert any(path.startswith("stage4_demand/") for path in artifact_paths)
+    assert any(path.startswith("stage5_strategy/") for path in artifact_paths)
     assert "final_report.md" in artifact_paths
     assert "audit.md" in artifact_paths
     # 6 gate decisions written
     assert gate_count == 6
-    # 6 distinct src_ids cited
-    assert evidence_count == 6
+    # 15 worker-level evidence rows persisted.
+    assert evidence_count == 15
     assert run is not None
     assert run.status == RunStatus.completed
 

@@ -46,6 +46,9 @@ echo "==> Frontend: pnpm lint"
 echo "==> Frontend: pnpm typecheck"
 ( cd frontend && pnpm typecheck )
 
+echo "==> Frontend: node --test lib/runEvents.test.js"
+( cd frontend && node --test lib/runEvents.test.js )
+
 if [[ "${CHECK_BUILD:-0}" == "1" ]]; then
   echo "==> Frontend: pnpm build (CHECK_BUILD=1)"
   ( cd frontend && pnpm build )

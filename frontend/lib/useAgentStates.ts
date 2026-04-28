@@ -40,7 +40,14 @@ export interface AgentNodeData {
   /** Human-readable label. */
   label: string;
   /** Logical kind — drives icon and ordering. */
-  kind: "framing" | "stage" | "reviewer" | "synthesis" | "audit" | "placeholder";
+  kind:
+    | "framing"
+    | "stage"
+    | "worker"
+    | "reviewer"
+    | "synthesis"
+    | "audit"
+    | "placeholder";
   /** Visual state. */
   state: AgentNodeState;
   /** 1-based stage index (only set for kind === "stage"). */
@@ -57,6 +64,8 @@ export interface AgentNodeData {
   lastTs: string | null;
   /** Total number of events for this stage. */
   eventCount: number;
+  /** Nested worker nodes for a stage. */
+  children?: AgentNodeData[];
 }
 
 export interface AgentEdgeData {
@@ -116,14 +125,19 @@ function emptyNode(
   return node;
 }
 
+function prettyLabel(value: string): string {
+  return value
+    .split(/[._-]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 /** Pretty-print a stage slug like `stage4_models` → "Models". */
 function prettyStageLabel(slug: string): string {
   const m = slug.match(/^stage\d+_(.+)$/);
   const tail = m ? m[1]! : slug;
-  return tail
-    .split(/[_-]/)
-    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-    .join(" ");
+  return prettyLabel(tail);
 }
 
 function stageIndexFromSlug(slug: string): number | null {
@@ -156,10 +170,35 @@ function classify(agent: string | null | undefined): {
   return { kind: "other", id: a, label: a };
 }
 
+function parseWorkerAgent(agent: string | null | undefined): {
+  parentId: string;
+  workerId: string;
+  workerLabel: string;
+} | null {
+  if (!agent) return null;
+  const normalized = agent.toLowerCase().trim();
+  const dotIndex = normalized.indexOf(".");
+  if (dotIndex <= 0) return null;
+
+  const parentId = normalized.slice(0, dotIndex);
+  const workerSlug = normalized.slice(dotIndex + 1);
+  if (!workerSlug) return null;
+
+  const parent = classify(parentId);
+  if (parent.kind !== "stage") return null;
+
+  return {
+    parentId,
+    workerId: normalized,
+    workerLabel: prettyLabel(workerSlug),
+  };
+}
+
 export function useAgentStates(events: RunEvent[]): AgentStatesResult {
   return useMemo(() => {
     // Discover nodes by kind, deduplicated by id.
     const discovered = new Map<string, AgentNodeData>();
+    const tracked = new Map<string, AgentNodeData>();
     let activeId: string | null = null;
     let runFailed = false;
     let runCompleted = false;
@@ -177,12 +216,52 @@ export function useAgentStates(events: RunEvent[]): AgentStatesResult {
       if (!node) {
         node = emptyNode(id, label, kind, stageIndex);
         discovered.set(id, node);
+        tracked.set(id, node);
         if (kind === "stage" && !stageOrder.includes(id)) stageOrder.push(id);
       }
       return node;
     };
 
+    const ensureChild = (parentId: string, childId: string, label: string) => {
+      const parentMeta = classify(parentId);
+      const parent = ensure(
+        parentMeta.id,
+        parentMeta.label,
+        parentMeta.kind === "stage" ? "stage" : "stage",
+        parentMeta.stageIndex,
+      );
+
+      if (!parent.children) parent.children = [];
+
+      let child = tracked.get(childId);
+      if (!child) {
+        child = emptyNode(childId, label, "worker");
+        parent.children.push(child);
+        tracked.set(childId, child);
+      }
+
+      return child;
+    };
+
+    const settleNode = (id: string | null) => {
+      if (!id) return;
+
+      const node = tracked.get(id);
+      if (node && node.state === "working") {
+        node.state = "completed";
+      }
+
+      const workerMeta = parseWorkerAgent(id);
+      if (!workerMeta) return;
+
+      const parent = discovered.get(workerMeta.parentId);
+      if (parent && parent.state === "working") {
+        parent.state = "completed";
+      }
+    };
+
     for (const evt of events) {
+      const workerMeta = parseWorkerAgent(evt.agent);
       const meta = classify(evt.agent);
       // Reviewer events don't get a node — they decorate the target stage.
       if (meta.kind === "reviewer" || meta.kind === "other") {
@@ -230,18 +309,31 @@ export function useAgentStates(events: RunEvent[]): AgentStatesResult {
       }
 
       // Lifecycle events with no agent slot fall through to system.
-      const node = ensure(meta.id, meta.label, meta.kind, meta.stageIndex);
+      const node = workerMeta
+        ? ensureChild(workerMeta.parentId, workerMeta.workerId, workerMeta.workerLabel)
+        : ensure(meta.id, meta.label, meta.kind, meta.stageIndex);
+      const parentNode = workerMeta
+        ? discovered.get(workerMeta.parentId) ??
+          ensure(meta.id.slice(0, meta.id.indexOf(".")), meta.label, "stage")
+        : null;
       node.eventCount += 1;
       node.lastTs = evt.ts;
+      if (parentNode) {
+        parentNode.eventCount += 1;
+        parentNode.lastTs = evt.ts;
+      }
 
       if (evt.type === "agent_message") {
         // Mark previous active node as completed if a different node is now talking.
         if (activeId && activeId !== node.id) {
-          const prev = discovered.get(activeId);
-          if (prev && prev.state === "working") prev.state = "completed";
+          settleNode(activeId);
         }
         node.state = "working";
         node.reiterating = false;
+        if (parentNode) {
+          parentNode.state = "working";
+          parentNode.reiterating = false;
+        }
         const text = (evt.payload as { text?: string }).text;
         if (typeof text === "string" && text.trim().length > 0) {
           node.lastMessage = text;
@@ -254,21 +346,24 @@ export function useAgentStates(events: RunEvent[]): AgentStatesResult {
         }
         // Don't downgrade an already-completed stage.
         if (node.state === "idle") node.state = "working";
+        if (parentNode && parentNode.state === "idle") parentNode.state = "working";
       }
     }
 
     for (const evt of events) {
-      if (evt.type === "run_failed") runFailed = true;
+      if (evt.type === "run_failed" || evt.type === "system.run_failed") {
+        runFailed = true;
+      }
       if (evt.type === "run_completed") runCompleted = true;
     }
 
     if (runFailed && activeId) {
-      const node = discovered.get(activeId);
+      const node = tracked.get(activeId);
       if (node) node.state = "failed";
       activeId = null;
     }
     if (runCompleted) {
-      for (const node of discovered.values()) {
+      for (const node of tracked.values()) {
         if (node.state === "working") node.state = "completed";
       }
       activeId = null;

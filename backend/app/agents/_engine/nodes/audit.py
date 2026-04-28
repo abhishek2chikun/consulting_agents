@@ -8,13 +8,16 @@ from collections.abc import Awaitable, Callable
 from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy import select
 
+from app.agents._engine.paths import normalize_artifact_path
 from app.agents._engine.profile import ConsultingProfile
+from app.agents._engine.skills import inject_skills
 from app.agents._engine.state import RunState
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
 from app.models import Artifact, Run, RunStatus
 
 AUDIT_PATH = "audit.md"
+REPORT_PATH = "final_report.md"
 
 
 def _default_profile() -> ConsultingProfile:
@@ -23,20 +26,30 @@ def _default_profile() -> ConsultingProfile:
     return MARKET_ENTRY_PROFILE
 
 
+def _get_artifact_by_path(artifacts: dict[str, str], expected_path: str) -> tuple[str, str]:
+    if expected_path in artifacts:
+        return expected_path, artifacts[expected_path]
+
+    for path in sorted(normalize_artifact_path(expected_path) - {expected_path}):
+        if path in artifacts:
+            return path, artifacts[path]
+    return expected_path, f"(missing {expected_path})"
+
+
 def build_audit_node(
     *, model: object, profile: ConsultingProfile | None = None
 ) -> Callable[[RunState], Awaitable[RunState]]:
     profile = profile or _default_profile()
-    system_prompt = profile.load_prompt("audit")
+    system_prompt = inject_skills(profile.load_prompt("audit"), profile.audit_skills)
 
     async def audit_node(state: RunState) -> RunState:
         run_uuid = uuid.UUID(state["run_id"])
         artifacts = dict(state.get("artifacts", {}) or {})
         gate_verdicts = state.get("gate_verdicts", {}) or {}
 
-        report_body = artifacts.get("final_report.md", "(missing final_report.md)")
+        report_path, report_body = _get_artifact_by_path(artifacts, REPORT_PATH)
         user_msg = (
-            f"final_report.md:\n{report_body}\n\n"
+            f"{report_path}:\n{report_body}\n\n"
             f"gate_verdicts:\n{gate_verdicts}\n\n"
             "Produce audit.md now."
         )

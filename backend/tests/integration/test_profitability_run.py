@@ -17,28 +17,30 @@ from app.main import create_app
 from app.models import Artifact, Message, Run, RunStatus
 from app.testing.fake_chat_model import FakeChatModel
 from app.workers.run_worker import ModelFactory
+from tests.integration.v16_smoke_helpers import ScriptedResearchModel
 
 
-def _stage_payload(stage_slug: str, src_id: str) -> dict:
+def _stage_payload(agent_id: str, src_id: str) -> dict:
+    _stage_slug, worker_slug = agent_id.split(".", 1)
     return {
         "artifacts": [
             {
-                "path": f"{stage_slug}/findings.md",
-                "content": f"{stage_slug} profitability finding [^{src_id}].",
+                "path": "findings.md",
+                "content": f"{agent_id} profitability finding [^{src_id}].",
                 "kind": "markdown",
             }
         ],
         "evidence": [
             {
                 "src_id": src_id,
-                "title": f"{stage_slug} source",
+                "title": f"{worker_slug} source",
                 "url": f"https://example.com/{src_id}",
                 "snippet": "snippet",
                 "kind": "web",
                 "provider": "tavily",
             }
         ],
-        "summary": f"{stage_slug} summary",
+        "summary": f"{agent_id} summary",
     }
 
 
@@ -79,14 +81,26 @@ def _fresh_factory() -> ModelFactory:
         "stage4_competitor",
         "stage5_levers",
     ]
+    workers_by_stage = {
+        "stage1_revenue": ("revenue_decomposition", "growth_drivers", "customer_segments"),
+        "stage2_cost": ("cost_structure", "fixed_vs_variable", "cost_drivers"),
+        "stage3_margin": ("margin_walk", "unit_economics", "benchmarks"),
+        "stage4_competitor": ("peer_benchmarks", "structural_advantages", "gap_analysis"),
+        "stage5_levers": ("lever_inventory", "prioritization", "roadmap"),
+    }
+    structured_by_agent: dict[str, dict] = {}
+    worker_index = 1
+    for stage_slug in stage_slugs:
+        for worker_slug in workers_by_stage[stage_slug]:
+            agent_id = f"{stage_slug}.{worker_slug}"
+            structured_by_agent[agent_id] = _stage_payload(agent_id, f"p{worker_index}")
+            worker_index += 1
 
     models: dict[str, FakeChatModel] = {
         "framing": FakeChatModel(structured_responses=[framing_response]),
-        "research": FakeChatModel(
-            structured_responses=[
-                _stage_payload(stage_slug, f"p{index}")
-                for index, stage_slug in enumerate(stage_slugs, start=1)
-            ]
+        "research": ScriptedResearchModel(
+            tool_calls_by_agent={},
+            structured_responses_by_agent=structured_by_agent,
         ),
         "reviewer": FakeChatModel(
             structured_responses=[_gate(stage_slug) for stage_slug in stage_slugs]
@@ -94,7 +108,8 @@ def _fresh_factory() -> ModelFactory:
         "synthesis": FakeChatModel(
             responses=[
                 "# Profitability Final Report\n\n## Executive Summary\n"
-                "- Revenue, cost, margin, competitor, and lever findings [^p1].\n"
+                "- Revenue, cost, margin, competitor, and lever findings "
+                "[^p1] [^p4] [^p7] [^p10] [^p13].\n"
             ]
         ),
         "audit": FakeChatModel(
@@ -205,11 +220,11 @@ async def test_profitability_answers_drive_full_pipeline_and_persist_artifacts(
             }
 
         assert len(messages) == 1
-        assert "stage1_revenue/findings.md" in artifact_paths
-        assert "stage2_cost/findings.md" in artifact_paths
-        assert "stage3_margin/findings.md" in artifact_paths
-        assert "stage4_competitor/findings.md" in artifact_paths
-        assert "stage5_levers/findings.md" in artifact_paths
+        assert any(path.startswith("stage1_revenue/") for path in artifact_paths)
+        assert any(path.startswith("stage2_cost/") for path in artifact_paths)
+        assert any(path.startswith("stage3_margin/") for path in artifact_paths)
+        assert any(path.startswith("stage4_competitor/") for path in artifact_paths)
+        assert any(path.startswith("stage5_levers/") for path in artifact_paths)
         assert "final_report.md" in artifact_paths
         assert "audit.md" in artifact_paths
 
