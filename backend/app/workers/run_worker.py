@@ -156,7 +156,6 @@ async def continue_after_framing(
     model_factory: ModelFactory | None = None,
 ) -> None:
     """Persist answers and drive the full pipeline through audit."""
-    factory = model_factory or await default_model_factory(run_id)
     settings = get_settings()
     heartbeat_task: asyncio.Task[None] | None = None
     timeout_triggered = asyncio.Event()
@@ -164,61 +163,66 @@ async def continue_after_framing(
     run_task = asyncio.current_task()
     if run_task is None:  # pragma: no cover - asyncio always provides one here.
         raise RuntimeError("continue_after_framing requires an active asyncio task")
-
-    # 1. Persist answers as a single user-role message (audit trail).
-    async with AsyncSessionLocal() as session:
-        run = await session.get(Run, run_id)
-        if run is None:
-            return
-        run.status = RunStatus.running
-        if run.started_at is None:
-            run.started_at = _utcnow()
-        run.heartbeat_at = _utcnow()
-        session.add(
-            Message(
-                run_id=run_id,
-                role=MessageRole.user,
-                content=json.dumps(answers),
-            )
-        )
-        await session.commit()
-        goal = run.goal
-
-    heartbeat_task = asyncio.create_task(
-        _heartbeat_loop(
-            run_id,
-            interval_seconds=settings.heartbeat_interval_seconds,
-            timeout_seconds=settings.run_timeout_seconds,
-            run_task=run_task,
-            timeout_triggered=timeout_triggered,
-        )
-    )
-
-    # 2. Build the framing brief from goal + answers (no second LLM call).
-    framing_brief = {
-        "objective": goal,
-        "target_market": str(answers.get("target_market", "")) or "unspecified",
-        "constraints": [],
-        "questionnaire_answers": dict(answers),
-    }
-
-    # 3. Compile the graph WITHOUT the framing node and stream node-by-node
-    #    so we can poll Run.status between nodes for cooperative cancel.
-    graph = build_consulting_graph(
-        profile,
-        model_factory=factory,
-        checkpointer=None,
-        include_framing=False,
-    )
-
-    initial: dict[str, Any] = {
-        "run_id": str(run_id),
-        "goal": goal,
-        "framing": framing_brief,
-    }
-
     cancelled = False
     try:
+        factory = model_factory or await default_model_factory(run_id)
+
+        # 1. Persist answers as a single user-role message (audit trail).
+        async with AsyncSessionLocal() as session:
+            run = await session.get(Run, run_id)
+            if run is None:
+                return
+            if run.status == RunStatus.cancelling:
+                await session.rollback()
+                await _mark_cancelled(run_id)
+                return
+            run.status = RunStatus.running
+            if run.started_at is None:
+                run.started_at = _utcnow()
+            run.heartbeat_at = _utcnow()
+            session.add(
+                Message(
+                    run_id=run_id,
+                    role=MessageRole.user,
+                    content=json.dumps(answers),
+                )
+            )
+            await session.commit()
+            goal = run.goal
+
+        heartbeat_task = asyncio.create_task(
+            _heartbeat_loop(
+                run_id,
+                interval_seconds=settings.heartbeat_interval_seconds,
+                timeout_seconds=settings.run_timeout_seconds,
+                run_task=run_task,
+                timeout_triggered=timeout_triggered,
+            )
+        )
+
+        # 2. Build the framing brief from goal + answers (no second LLM call).
+        framing_brief = {
+            "objective": goal,
+            "target_market": str(answers.get("target_market", "")) or "unspecified",
+            "constraints": [],
+            "questionnaire_answers": dict(answers),
+        }
+
+        # 3. Compile the graph WITHOUT the framing node and stream node-by-node
+        #    so we can poll Run.status between nodes for cooperative cancel.
+        graph = build_consulting_graph(
+            profile,
+            model_factory=factory,
+            checkpointer=None,
+            include_framing=False,
+        )
+
+        initial: dict[str, Any] = {
+            "run_id": str(run_id),
+            "goal": goal,
+            "framing": framing_brief,
+        }
+
         async for _chunk in graph.astream(initial):
             # Each chunk is a {node_name: state_update} dict yielded after
             # a node completes. Check for cooperative cancel before
