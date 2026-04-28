@@ -112,6 +112,8 @@ async def test_pricing_v16_profile_runs_with_workers_and_stage_tools(
         artifact_paths, gates, events = await run_summary(run_id)
         assert "final_report.md" in artifact_paths
         assert len(gates) == 5
+        assert {gate.stage for gate in gates} == set(spec.stage_slugs)
+        assert all(gate.verdict == "advance" for gate in gates)
 
         rich_stages = 0
         for stage_slug in spec.stage_slugs:
@@ -122,9 +124,10 @@ async def test_pricing_v16_profile_runs_with_workers_and_stage_tools(
                 assert any(path.startswith(f"{stage_slug}/{worker_slug}/") for path in stage_paths)
         assert rich_stages >= 3
 
-        assert "Applicable Consulting Skills" in system_prompt_text(
-            models["framing"], structured=True
-        )
+        framing_prompt = system_prompt_text(models["framing"], structured=True)
+        assert "Applicable Consulting Skills" in framing_prompt
+        for skill_title in spec.framing_skill_titles:
+            assert skill_title in framing_prompt
         research_model = models["research"]
         assert isinstance(research_model, ScriptedResearchModel)
         prompts = {
