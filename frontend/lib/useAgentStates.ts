@@ -243,6 +243,23 @@ export function useAgentStates(events: RunEvent[]): AgentStatesResult {
       return child;
     };
 
+    const settleNode = (id: string | null) => {
+      if (!id) return;
+
+      const node = tracked.get(id);
+      if (node && node.state === "working") {
+        node.state = "completed";
+      }
+
+      const workerMeta = parseWorkerAgent(id);
+      if (!workerMeta) return;
+
+      const parent = discovered.get(workerMeta.parentId);
+      if (parent && parent.state === "working") {
+        parent.state = "completed";
+      }
+    };
+
     for (const evt of events) {
       const workerMeta = parseWorkerAgent(evt.agent);
       const meta = classify(evt.agent);
@@ -295,17 +312,28 @@ export function useAgentStates(events: RunEvent[]): AgentStatesResult {
       const node = workerMeta
         ? ensureChild(workerMeta.parentId, workerMeta.workerId, workerMeta.workerLabel)
         : ensure(meta.id, meta.label, meta.kind, meta.stageIndex);
+      const parentNode = workerMeta
+        ? discovered.get(workerMeta.parentId) ??
+          ensure(meta.id.slice(0, meta.id.indexOf(".")), meta.label, "stage")
+        : null;
       node.eventCount += 1;
       node.lastTs = evt.ts;
+      if (parentNode) {
+        parentNode.eventCount += 1;
+        parentNode.lastTs = evt.ts;
+      }
 
       if (evt.type === "agent_message") {
         // Mark previous active node as completed if a different node is now talking.
-        if (activeId && activeId !== node.id && !workerMeta) {
-          const prev = tracked.get(activeId);
-          if (prev && prev.state === "working") prev.state = "completed";
+        if (activeId && activeId !== node.id) {
+          settleNode(activeId);
         }
         node.state = "working";
         node.reiterating = false;
+        if (parentNode) {
+          parentNode.state = "working";
+          parentNode.reiterating = false;
+        }
         const text = (evt.payload as { text?: string }).text;
         if (typeof text === "string" && text.trim().length > 0) {
           node.lastMessage = text;
@@ -318,6 +346,7 @@ export function useAgentStates(events: RunEvent[]): AgentStatesResult {
         }
         // Don't downgrade an already-completed stage.
         if (node.state === "idle") node.state = "working";
+        if (parentNode && parentNode.state === "idle") parentNode.state = "working";
       }
     }
 

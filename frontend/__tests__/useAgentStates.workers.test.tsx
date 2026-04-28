@@ -53,12 +53,14 @@ describe("useAgentStates worker nodes", () => {
 
     expect(parent).toBeDefined();
     expect(parent?.lastMessage).toBe("Parent stage started");
-    expect(parent?.eventCount).toBe(1);
+    expect(parent?.eventCount).toBe(4);
+    expect(parent?.lastTs).toBe("2026-04-28T10:00:30Z");
+    expect(parent?.state).toBe("working");
     expect(parent?.children).toEqual([
       expect.objectContaining({
         id: "stage1_foundation.market_sizing",
         label: "Market Sizing",
-        state: "working",
+        state: "completed",
         lastMessage: "Sizing TAM",
         artifacts: ["artifacts/stage1/market-sizing.md"],
         eventCount: 2,
@@ -73,5 +75,49 @@ describe("useAgentStates worker nodes", () => {
       }),
     ]);
     expect(result.current.nodes.find((node) => node.id === "stage1_foundation.market_sizing")).toBeUndefined();
+  });
+
+  it("keeps the parent stage state in sync when worker activity advances to the next stage", () => {
+    const events: RunEvent[] = [
+      event({
+        id: 1,
+        agent: "stage1_foundation",
+        type: "agent_message",
+        payload: { text: "Parent stage started" },
+      }),
+      event({
+        id: 2,
+        ts: "2026-04-28T10:00:10Z",
+        agent: "stage1_foundation.market_sizing",
+        type: "agent_message",
+        payload: { text: "Sizing TAM" },
+      }),
+      event({
+        id: 3,
+        ts: "2026-04-28T10:00:20Z",
+        agent: "stage2_analysis",
+        type: "agent_message",
+        payload: { text: "Stage 2 started" },
+      }),
+    ];
+
+    const { result } = renderHook(() => useAgentStates(events));
+
+    const stage1 = result.current.nodes.find((node) => node.id === "stage1_foundation");
+    const stage2 = result.current.nodes.find((node) => node.id === "stage2_analysis");
+
+    expect(stage1).toBeDefined();
+    expect(stage1?.eventCount).toBe(2);
+    expect(stage1?.lastTs).toBe("2026-04-28T10:00:10Z");
+    expect(stage1?.state).toBe("completed");
+    expect(stage1?.children).toEqual([
+      expect.objectContaining({
+        id: "stage1_foundation.market_sizing",
+        state: "completed",
+        lastMessage: "Sizing TAM",
+      }),
+    ]);
+    expect(stage2?.state).toBe("working");
+    expect(result.current.activeId).toBe("stage2_analysis");
   });
 });
