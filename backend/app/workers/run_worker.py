@@ -35,6 +35,7 @@ from app.agents._engine.profile import ConsultingProfile
 from app.agents.budget import BudgetTracker
 from app.agents.llm import PRODUCTION_MODEL_MARKER, get_chat_model, provider_name_for
 from app.agents.market_entry.nodes.framing import build_framing_node
+from app.agents.tools import build_tools_factory
 from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
@@ -234,6 +235,7 @@ async def continue_after_framing(
         graph = build_consulting_graph(
             profile,
             model_factory=factory,
+            tools_factory=build_tools_factory(run_id, AsyncSessionLocal),
             checkpointer=None,
             include_framing=False,
         )

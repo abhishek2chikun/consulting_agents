@@ -23,28 +23,30 @@ from app.main import create_app
 from app.models import Artifact, Message, Run, RunStatus
 from app.testing.fake_chat_model import FakeChatModel
 from app.workers.run_worker import ModelFactory
+from tests.integration.v16_smoke_helpers import ScriptedResearchModel
 
 
-def _stage_payload(stage_slug: str, src_id: str) -> dict:
+def _stage_payload(agent_id: str, src_id: str) -> dict:
+    _stage_slug, worker_slug = agent_id.split(".", 1)
     return {
         "artifacts": [
             {
-                "path": f"{stage_slug}/findings.md",
-                "content": f"{stage_slug} finding [^{src_id}].",
+                "path": "findings.md",
+                "content": f"{agent_id} finding [^{src_id}].",
                 "kind": "markdown",
             }
         ],
         "evidence": [
             {
                 "src_id": src_id,
-                "title": f"{stage_slug} source",
+                "title": f"{worker_slug} source",
                 "url": f"https://example.com/{src_id}",
                 "snippet": "snippet",
                 "kind": "web",
                 "provider": "tavily",
             }
         ],
-        "summary": f"{stage_slug} summary",
+        "summary": f"{agent_id} summary",
     }
 
 
@@ -88,14 +90,23 @@ def _fresh_factory() -> ModelFactory:
     }
 
     framing_model = FakeChatModel(structured_responses=[framing_response])
-    research_model = FakeChatModel(
-        structured_responses=[
-            _stage_payload("stage1_foundation", "s1"),
-            _stage_payload("stage2_competitive", "s2"),
-            _stage_payload("stage3_risk", "s3"),
-            _stage_payload("stage4_demand", "s4"),
-            _stage_payload("stage5_strategy", "s5"),
-        ]
+    stage_workers = {
+        "stage1_foundation": ("market_sizing", "customer", "regulatory"),
+        "stage2_competitive": ("competitor", "channel", "pricing"),
+        "stage3_risk": ("risk", "regulatory_risk", "operational_risk"),
+        "stage4_demand": ("demand_drivers", "willingness_to_pay", "segment_priority"),
+        "stage5_strategy": ("go_to_market", "partnerships", "milestones"),
+    }
+    structured_by_agent: dict[str, dict] = {}
+    index = 1
+    for stage_slug, worker_slugs in stage_workers.items():
+        for worker_slug in worker_slugs:
+            agent_id = f"{stage_slug}.{worker_slug}"
+            structured_by_agent[agent_id] = _stage_payload(agent_id, f"s{index}")
+            index += 1
+    research_model = ScriptedResearchModel(
+        tool_calls_by_agent={},
+        structured_responses_by_agent=structured_by_agent,
     )
     reviewer_model = FakeChatModel(
         structured_responses=[
@@ -306,11 +317,11 @@ async def test_answers_drive_full_pipeline_and_persist_artifacts(
                 .scalars()
                 .all()
             }
-        assert "stage1_foundation/findings.md" in artifact_paths
-        assert "stage2_competitive/findings.md" in artifact_paths
-        assert "stage3_risk/findings.md" in artifact_paths
-        assert "stage4_demand/findings.md" in artifact_paths
-        assert "stage5_strategy/findings.md" in artifact_paths
+        assert any(path.startswith("stage1_foundation/") for path in artifact_paths)
+        assert any(path.startswith("stage2_competitive/") for path in artifact_paths)
+        assert any(path.startswith("stage3_risk/") for path in artifact_paths)
+        assert any(path.startswith("stage4_demand/") for path in artifact_paths)
+        assert any(path.startswith("stage5_strategy/") for path in artifact_paths)
         assert "final_report.md" in artifact_paths
         assert "audit.md" in artifact_paths
     finally:

@@ -17,28 +17,30 @@ from app.main import create_app
 from app.models import Artifact, Evidence, Gate, Message, Run, RunStatus
 from app.testing.fake_chat_model import FakeChatModel
 from app.workers.run_worker import ModelFactory
+from tests.integration.v16_smoke_helpers import ScriptedResearchModel
 
 
-def _stage_payload(stage_slug: str, src_id: str) -> dict:
+def _stage_payload(agent_id: str, src_id: str) -> dict:
+    stage_slug, worker_slug = agent_id.split(".", 1)
     return {
         "artifacts": [
             {
-                "path": f"{stage_slug}/findings.md",
-                "content": f"{stage_slug} pricing finding [^{src_id}].",
+                "path": "findings.md",
+                "content": f"{agent_id} pricing finding [^{src_id}].",
                 "kind": "markdown",
             }
         ],
         "evidence": [
             {
                 "src_id": src_id,
-                "title": f"{stage_slug} source",
+                "title": f"{worker_slug} source",
                 "url": f"https://example.com/{src_id}",
                 "snippet": "snippet",
                 "kind": "web",
                 "provider": "tavily",
             }
         ],
-        "summary": f"{stage_slug} summary",
+        "summary": f"{agent_id} summary",
     }
 
 
@@ -79,14 +81,26 @@ def _fresh_factory() -> ModelFactory:
         "stage4_models",
         "stage5_rollout",
     ]
+    workers_by_stage = {
+        "stage1_value": ("value_drivers", "value_quantification", "customer_perception"),
+        "stage2_segments": ("segmentation", "willingness_to_pay", "segment_priority"),
+        "stage3_competitive": ("competitor_pricing", "positioning", "share_dynamics"),
+        "stage4_models": ("pricing_models", "financial_impact", "packaging"),
+        "stage5_rollout": ("rollout_plan", "change_management", "monitoring"),
+    }
+    structured_by_agent: dict[str, dict] = {}
+    worker_index = 1
+    for stage_slug in stage_slugs:
+        for worker_slug in workers_by_stage[stage_slug]:
+            agent_id = f"{stage_slug}.{worker_slug}"
+            structured_by_agent[agent_id] = _stage_payload(agent_id, f"pr{worker_index}")
+            worker_index += 1
 
     models: dict[str, FakeChatModel] = {
         "framing": FakeChatModel(structured_responses=[framing_response]),
-        "research": FakeChatModel(
-            structured_responses=[
-                _stage_payload(stage_slug, f"pr{index}")
-                for index, stage_slug in enumerate(stage_slugs, start=1)
-            ]
+        "research": ScriptedResearchModel(
+            tool_calls_by_agent={},
+            structured_responses_by_agent=structured_by_agent,
         ),
         "reviewer": FakeChatModel(
             structured_responses=[_gate(stage_slug) for stage_slug in stage_slugs]
@@ -95,7 +109,7 @@ def _fresh_factory() -> ModelFactory:
             responses=[
                 "# Pricing Final Report\n\n## Executive Summary\n"
                 "- Value, segments, competition, models, and rollout findings "
-                "[^pr1] [^pr2] [^pr3] [^pr4] [^pr5].\n"
+                "[^pr1] [^pr4] [^pr7] [^pr10] [^pr13].\n"
             ]
         ),
         "audit": FakeChatModel(
@@ -225,16 +239,12 @@ async def test_pricing_answers_drive_full_pipeline_and_persist_artifacts(
         assert len(gates) == 5
         assert {gate.stage for gate in gates} == set(stage_slugs)
         assert [gate.verdict for gate in gates] == ["advance"] * 5
-        assert {evidence.src_id for evidence in evidence_rows} == {
-            "pr1",
-            "pr2",
-            "pr3",
-            "pr4",
-            "pr5",
+        assert {f"pr{index}" for index in range(1, 16)} == {
+            evidence.src_id for evidence in evidence_rows
         }
-        assert len(evidence_rows) == 5
+        assert len(evidence_rows) == 15
         for stage_slug in stage_slugs:
-            assert f"{stage_slug}/findings.md" in artifact_paths
+            assert any(path.startswith(f"{stage_slug}/") for path in artifact_paths)
         assert "final_report.md" in artifact_paths
         assert "audit.md" in artifact_paths
 
@@ -243,7 +253,7 @@ async def test_pricing_answers_drive_full_pipeline_and_persist_artifacts(
         parsed = artifact.json()
         assert parsed["path"] == "final_report.md"
         assert "Pricing Final Report" in parsed["content"]
-        for index in range(1, 6):
+        for index in (1, 4, 7, 10, 13):
             assert f"[^pr{index}]" in parsed["content"]
         json.dumps(parsed)
     finally:
