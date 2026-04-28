@@ -8,23 +8,26 @@ produce a list of artifact files. Each file is persisted via
 ``write_artifact`` (which also publishes ``artifact_update`` events)
 and returned in the merged ``RunState.artifacts`` map.
 
-The ``tools`` parameter is accepted for forward-compatibility with a
-real DeepAgent ReAct loop in M7+. For V1 we use structured output so
-the workflow is deterministic and testable with a scripted model.
+    When tools are provided, the stage first runs a bounded ReAct loop and
+    then asks the model to produce the same structured output used by the
+    no-tools fallback path.
 """
 
 from __future__ import annotations
 
+import inspect
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Literal
+from typing import Any, Literal, cast
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.agents._engine.profile import ConsultingProfile
+from app.agents._engine.skills import inject_skills
 from app.agents._engine.state import EvidenceRef, RunState
+from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
 from app.models import Artifact, Evidence, EvidenceKind
@@ -81,11 +84,37 @@ def _format_existing(artifacts: dict[str, str]) -> str:
     return "\n\n".join(lines)
 
 
+def _stage_required_skills(profile: ConsultingProfile, stage_slug: str) -> tuple[str, ...]:
+    for stage in profile.stages:
+        if stage.slug == stage_slug or stage.node_name == stage_slug:
+            return stage.required_skills
+    return ()
+
+
+def _tool_name(tool: object) -> str | None:
+    name = getattr(tool, "name", None)
+    return name if isinstance(name, str) else None
+
+
+async def _invoke_tool(tool: object, args: object) -> object:
+    if hasattr(tool, "ainvoke"):
+        return await cast(Any, tool).ainvoke(args)
+    if hasattr(tool, "invoke"):
+        result = cast(Any, tool).invoke(args)
+    elif callable(tool):
+        result = tool(args)
+    else:
+        raise TypeError(f"Tool {tool!r} is not invokable")
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
 def make_stage_node(
     stage_slug: str,
     *,
     model: object,
-    tools: list[object] | None = None,  # noqa: ARG001  # reserved for M7 DeepAgent wiring
+    tools: list[object] | None = None,
     profile: ConsultingProfile | None = None,
 ) -> Callable[[RunState], Awaitable[RunState]]:
     """Build an async LangGraph node for a stage.
@@ -95,7 +124,11 @@ def make_stage_node(
     """
 
     profile = profile or _default_profile()
-    system_prompt = profile.load_prompt(stage_slug)
+    system_prompt = inject_skills(
+        profile.load_prompt(stage_slug),
+        _stage_required_skills(profile, stage_slug),
+    )
+    available_tools = list(tools or [])
 
     async def stage_node(state: RunState) -> RunState:
         framing = state.get("framing", {}) or {}
@@ -120,10 +153,51 @@ def make_stage_node(
             "decision-relevant evidence rows. Return valid JSON only."
         )
 
+        messages: list[BaseMessage] = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_msg),
+        ]
+        executed_tool_calls = 0
+
+        if available_tools:
+            loop_model = (
+                model.bind_tools(available_tools) if hasattr(model, "bind_tools") else model
+            )
+            tools_by_name = {name: tool for tool in available_tools if (name := _tool_name(tool))}
+            for _ in range(get_settings().react_max_iterations):
+                ai = await cast(Any, loop_model).ainvoke(messages)
+                if not isinstance(ai, AIMessage):
+                    ai = AIMessage(content=getattr(ai, "content", str(ai)))
+                messages.append(ai)
+                tool_calls = ai.tool_calls or []
+                if not tool_calls:
+                    break
+                for call in tool_calls:
+                    tool = tools_by_name.get(call["name"])
+                    content = (
+                        f"Tool not found: {call['name']}"
+                        if tool is None
+                        else str(await _invoke_tool(tool, call.get("args", {})))
+                    )
+                    if tool is not None:
+                        executed_tool_calls += 1
+                    messages.append(
+                        ToolMessage(
+                            content=content,
+                            tool_call_id=call.get("id") or call["name"],
+                            name=call["name"],
+                        )
+                    )
+
+        structured_messages = messages
+        if available_tools:
+            structured_messages = [
+                *messages,
+                HumanMessage(content="Now produce StageOutput"),
+            ]
+
         structured = model.with_structured_output(StageOutput)  # type: ignore[attr-defined]
-        result = await structured.ainvoke(
-            [SystemMessage(content=system_prompt), HumanMessage(content=user_msg)]
-        )
+        result = await structured.ainvoke(structured_messages)
         if not isinstance(result, StageOutput):
             result = StageOutput.model_validate(result)
 
@@ -184,6 +258,13 @@ def make_stage_node(
                 run_uuid,
                 "artifact_update",
                 {"path": af.path},
+                agent=stage_slug,
+            )
+        if available_tools and executed_tool_calls == 0:
+            await publish(
+                run_uuid,
+                "agent_message",
+                {"text": f"{stage_slug}: produced StageOutput without tool use"},
                 agent=stage_slug,
             )
         if result.summary:

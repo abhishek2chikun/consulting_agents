@@ -62,6 +62,7 @@ class FakeChatModel(BaseChatModel):
     structured_responses: deque[Any] = deque()
     calls: list[Sequence[BaseMessage]] = []
     structured_calls: list[tuple[Any, Any]] = []
+    bound_tools: list[object] = []
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -77,6 +78,7 @@ class FakeChatModel(BaseChatModel):
         object.__setattr__(self, "structured_responses", deque(structured_responses or ()))
         object.__setattr__(self, "calls", [])
         object.__setattr__(self, "structured_calls", [])
+        object.__setattr__(self, "bound_tools", [])
 
     @property
     def _llm_type(self) -> str:
@@ -114,6 +116,10 @@ class FakeChatModel(BaseChatModel):
         **_: Any,
     ) -> Runnable[Any, Any]:
         return _StructuredRunnable(self, schema)
+
+    def bind_tools(self, tools: Sequence[object], **_: Any) -> FakeChatModel:
+        object.__setattr__(self, "bound_tools", list(tools))
+        return self
 
 
 __all__ = ["FakeChatModel"]
