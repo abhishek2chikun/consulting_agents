@@ -25,6 +25,7 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from app.agents._engine.graph import build_consulting_graph
@@ -32,6 +33,7 @@ from app.agents._engine.profile import ConsultingProfile
 from app.agents.budget import BudgetTracker
 from app.agents.llm import get_chat_model, provider_name_for
 from app.agents.market_entry.nodes.framing import build_framing_node
+from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
 from app.models import Message, MessageRole, Run, RunStatus
@@ -59,6 +61,12 @@ def _attach_budget_tracker(
 
 
 logger = logging.getLogger(__name__)
+
+TERMINAL_RUN_STATUSES = {
+    RunStatus.completed,
+    RunStatus.failed,
+    RunStatus.cancelled,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +157,8 @@ async def continue_after_framing(
 ) -> None:
     """Persist answers and drive the full pipeline through audit."""
     factory = model_factory or await default_model_factory(run_id)
+    settings = get_settings()
+    heartbeat_task: asyncio.Task[None] | None = None
 
     # 1. Persist answers as a single user-role message (audit trail).
     async with AsyncSessionLocal() as session:
@@ -156,6 +166,9 @@ async def continue_after_framing(
         if run is None:
             return
         run.status = RunStatus.running
+        if run.started_at is None:
+            run.started_at = _utcnow()
+        run.heartbeat_at = _utcnow()
         session.add(
             Message(
                 run_id=run_id,
@@ -165,6 +178,13 @@ async def continue_after_framing(
         )
         await session.commit()
         goal = run.goal
+
+    heartbeat_task = asyncio.create_task(
+        _heartbeat_loop(
+            run_id,
+            interval_seconds=settings.heartbeat_interval_seconds,
+        )
+    )
 
     # 2. Build the framing brief from goal + answers (no second LLM call).
     framing_brief = {
@@ -191,20 +211,34 @@ async def continue_after_framing(
 
     cancelled = False
     try:
-        async for _chunk in graph.astream(initial):
-            # Each chunk is a {node_name: state_update} dict yielded after
-            # a node completes. Check for cooperative cancel before
-            # entering the next node.
-            if await _run_is_cancelling(run_id):
-                cancelled = True
-                break
+        async with asyncio.timeout(settings.run_timeout_seconds):
+            async for _chunk in graph.astream(initial):
+                # Each chunk is a {node_name: state_update} dict yielded after
+                # a node completes. Check for cooperative cancel before
+                # entering the next node.
+                if await _run_is_cancelling(run_id):
+                    cancelled = True
+                    break
     except asyncio.CancelledError:
         await _mark_cancelled(run_id)
+        return
+    except TimeoutError:
+        await _mark_failed(
+            run_id,
+            reason=f"timeout: exceeded {settings.run_timeout_seconds} s budget",
+        )
         return
     except Exception as exc:
         logger.exception("graph execution failed for run %s", run_id)
         await _mark_failed(run_id, reason=_exception_reason(exc))
         return
+    finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
     if cancelled:
         await _mark_cancelled(run_id)
@@ -221,6 +255,9 @@ async def continue_after_framing(
                 run_id,
                 reason="graph completed without transitioning Run.status",
             )
+        elif run is not None and run.status in TERMINAL_RUN_STATUSES and run.completed_at is None:
+            run.completed_at = _utcnow()
+            await session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +269,21 @@ async def _run_is_cancelling(run_id: uuid.UUID) -> bool:
     async with AsyncSessionLocal() as session:
         run = await session.get(Run, run_id)
         return run is not None and run.status == RunStatus.cancelling
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+async def _heartbeat_loop(run_id: uuid.UUID, *, interval_seconds: int) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        async with AsyncSessionLocal() as session:
+            run = await session.get(Run, run_id)
+            if run is None or run.status in TERMINAL_RUN_STATUSES:
+                return
+            run.heartbeat_at = _utcnow()
+            await session.commit()
 
 
 def _exception_reason(exc: BaseException) -> str:
@@ -253,6 +305,7 @@ async def _mark_cancelled(run_id: uuid.UUID) -> None:
         if run is None:
             return
         run.status = RunStatus.cancelled
+        run.completed_at = _utcnow()
         await session.commit()
     await publish(run_id, "run_cancelled", {"reason": "user_request"}, agent="system")
 
@@ -263,6 +316,7 @@ async def _mark_failed(run_id: uuid.UUID, *, reason: str) -> None:
         if run is None:
             return
         run.status = RunStatus.failed
+        run.completed_at = _utcnow()
         await session.commit()
     await publish(run_id, "run_failed", {"reason": reason}, agent="system")
 
