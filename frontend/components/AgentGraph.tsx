@@ -64,6 +64,7 @@ const STAGE_END_X = 66;
 const KIND_ICON: Record<AgentNodeData["kind"], LucideIcon> = {
   framing: Target,
   stage: Search,
+  worker: Search,
   reviewer: ShieldCheck,
   synthesis: Sparkles,
   audit: Shield,
@@ -365,13 +366,16 @@ export function AgentGraph({ events, className }: AgentGraphProps) {
 
 function Node({ node }: { node: NodeLayout }) {
   const [open, setOpen] = useState(false);
+  const [childrenOpen, setChildrenOpen] = useState(true);
   const ref = useRef<HTMLDivElement>(null);
   const cls = stateClasses(node.state);
+  const hasChildren = (node.children?.length ?? 0) > 0;
 
   return (
     <div
       ref={ref}
       className="absolute"
+      data-agent-node={node.id}
       style={{
         left: `${node.x}%`,
         top: `${node.y}%`,
@@ -425,6 +429,43 @@ function Node({ node }: { node: NodeLayout }) {
           </span>
         )}
       </button>
+
+      {hasChildren && (
+        <div className="absolute left-1/2 top-full z-20 mt-13 flex min-w-[140px] -translate-x-1/2 flex-col items-center gap-1.5">
+          <button
+            type="button"
+            className="rounded-full border border-white/10 bg-stone-950/85 px-2 py-0.5 text-[9px] font-semibold tracking-wide text-stone-300 transition hover:border-white/20 hover:text-stone-100"
+            aria-label={childrenOpen ? `Hide workers for ${node.label}` : `Show workers for ${node.label}`}
+            onClick={() => setChildrenOpen((value) => !value)}
+          >
+            {childrenOpen ? "Hide workers" : "Show workers"}
+          </button>
+
+          {childrenOpen && (
+            <div className="flex max-w-[180px] flex-wrap items-center justify-center gap-1.5 rounded-2xl border border-white/8 bg-stone-950/80 px-2 py-2 shadow-xl backdrop-blur-sm">
+              {node.children!.map((child) => {
+                const childCls = stateClasses(child.state);
+
+                return (
+                  <div
+                    key={child.id}
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] leading-none shadow-sm",
+                      childCls.bg,
+                      childCls.border,
+                      childCls.text,
+                    )}
+                    title={child.lastMessage ?? child.id}
+                  >
+                    <span className="truncate font-medium">{child.label}</span>
+                    <span className="text-[9px] text-stone-400">{child.eventCount}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Label */}
       <div className="pointer-events-none absolute left-1/2 top-full mt-2 -translate-x-1/2 text-center">
