@@ -8,4 +8,5 @@ export const TERMINAL_RUN_EVENT_TYPES = new Set([
 export const RUN_LIFECYCLE_EVENT_TYPES = new Set([
   ...TERMINAL_RUN_EVENT_TYPES,
   "cancel_ack",
+  "run_retry_started",
 ]);

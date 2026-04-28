@@ -8,6 +8,7 @@ import {
   FileText,
   Loader2,
   RefreshCw,
+  RotateCcw,
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -20,7 +21,7 @@ import { ReportView } from "@/components/ReportView";
 import { SourcesSidebar } from "@/components/SourcesSidebar";
 import { UsagePanel } from "@/components/UsagePanel";
 import { Button } from "@/components/ui/button";
-import { getRun, getRunArtifact, submitRunAnswers, cancelRun } from "@/lib/api";
+import { getRun, getRunArtifact, submitRunAnswers, cancelRun, retryRun } from "@/lib/api";
 import { RUN_LIFECYCLE_EVENT_TYPES } from "@/lib/runEvents";
 import { useEventStream } from "@/lib/sse";
 import type { QuestionnaireSchema, RunInfoResponse } from "@/lib/types";
@@ -74,10 +75,12 @@ export default function RunPage() {
   const [answersSubmitted, setAnswersSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [streamReconnectKey, setStreamReconnectKey] = useState(0);
   const [highlightedSrcId, setHighlightedSrcId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"report" | "activity">("activity");
 
-  const { events, status: connStatus } = useEventStream(runId);
+  const { events, status: connStatus } = useEventStream(runId, streamReconnectKey);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -209,12 +212,28 @@ export default function RunPage() {
     }
   };
 
+  const handleRetry = async () => {
+    setRetrying(true);
+    try {
+      await retryRun(runId);
+      toast.success("Retry started");
+      setStreamReconnectKey((value) => value + 1);
+      await refresh();
+      setActiveTab("activity");
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   const runStatus = runInfo?.status;
   const isTerminal = runStatus ? TERMINAL_STATUSES.has(runStatus) : false;
   const isLive = connStatus === "open" || connStatus === "connecting";
   const hasReport = runInfo?.artifact_paths.includes(REPORT_PATH) ?? hasReportArtifact;
   const showQuestionnaire =
     questionnaire !== null && !answersSubmitted && runStatus === "questioning";
+  const canResume = runStatus === "failed" || runStatus === "cancelled";
 
   return (
     <div className="dark">
@@ -290,6 +309,18 @@ export default function RunPage() {
             >
               {loading ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
             </Button>
+            {canResume && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-sky-300 hover:bg-sky-500/10 hover:text-sky-200"
+                onClick={() => void handleRetry()}
+                disabled={retrying}
+              >
+                {retrying ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
+                <span className="hidden sm:inline">{runStatus === "cancelled" ? "Resume" : "Retry"}</span>
+              </Button>
+            )}
             {!isTerminal && (
               <Button
                 variant="ghost"

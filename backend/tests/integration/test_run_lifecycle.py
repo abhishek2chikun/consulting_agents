@@ -20,7 +20,18 @@ from sqlalchemy import delete, select
 from app.api.runs import get_run_model_factory_builder
 from app.core.db import AsyncSessionLocal
 from app.main import create_app
-from app.models import Artifact, Message, Run, RunStatus
+from app.models import (
+    SINGLETON_USER_ID,
+    Artifact,
+    Event,
+    Evidence,
+    EvidenceKind,
+    Gate,
+    Message,
+    MessageRole,
+    Run,
+    RunStatus,
+)
 from app.testing.fake_chat_model import FakeChatModel
 from app.workers.run_worker import ModelFactory
 from tests.integration.v16_smoke_helpers import ScriptedResearchModel
@@ -164,6 +175,78 @@ async def _cleanup_run(run_id: uuid.UUID) -> None:
     async with AsyncSessionLocal() as session:
         await session.execute(delete(Run).where(Run.id == run_id))
         await session.commit()
+
+
+async def _create_failed_run_ready_for_stage3_retry() -> uuid.UUID:
+    async with AsyncSessionLocal() as session:
+        run = Run(
+            user_id=SINGLETON_USER_ID,
+            task_id="market_entry",
+            goal="Retry from stage three",
+            status=RunStatus.failed,
+            model_snapshot={"settings": {}, "document_ids": []},
+        )
+        session.add(run)
+        await session.flush()
+        session.add(
+            Message(
+                run_id=run.id,
+                role=MessageRole.user,
+                content=json.dumps({"target_market": "Germany", "budget": "medium"}),
+            )
+        )
+        session.add_all(
+            [
+                Artifact(
+                    run_id=run.id,
+                    path="stage1_foundation/market_sizing/findings.md",
+                    kind="markdown",
+                    content="Stage 1 sizing [^s1].",
+                ),
+                Artifact(
+                    run_id=run.id,
+                    path="stage2_competitive/pricing/findings.md",
+                    kind="markdown",
+                    content="Stage 2 pricing [^s4].",
+                ),
+            ]
+        )
+        for index in range(1, 7):
+            session.add(
+                Evidence(
+                    run_id=run.id,
+                    src_id=f"s{index}",
+                    title=f"Prior source {index}",
+                    url=f"https://example.com/s{index}",
+                    snippet="snippet",
+                    kind=EvidenceKind.web,
+                    provider="test",
+                )
+            )
+        session.add_all(
+            [
+                Gate(
+                    run_id=run.id,
+                    stage="stage1_foundation",
+                    attempt=2,
+                    verdict="advance",
+                    gaps=[],
+                    target_agents=[],
+                    rationale="ok",
+                ),
+                Gate(
+                    run_id=run.id,
+                    stage="stage2_competitive",
+                    attempt=2,
+                    verdict="advance",
+                    gaps=[],
+                    target_agents=[],
+                    rationale="ok",
+                ),
+            ]
+        )
+        await session.commit()
+        return run.id
 
 
 async def _read_one_sse_event(response: httpx.Response, timeout: float = 5.0) -> dict[str, object]:
@@ -324,5 +407,213 @@ async def test_answers_drive_full_pipeline_and_persist_artifacts(
         assert any(path.startswith("stage5_strategy/") for path in artifact_paths)
         assert "final_report.md" in artifact_paths
         assert "audit.md" in artifact_paths
+    finally:
+        await _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_run_resumes_after_last_advanced_stage(
+    client: httpx.AsyncClient,
+) -> None:
+    run_id = await _create_failed_run_ready_for_stage3_retry()
+    try:
+        async with AsyncSessionLocal() as session:
+            stage1_count_before = len(
+                (
+                    await session.execute(
+                        select(Artifact).where(
+                            Artifact.run_id == run_id,
+                            Artifact.path.like("stage1_foundation/%"),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        retry = await client.post(f"/runs/{run_id}/retry")
+        assert retry.status_code == 204, retry.text
+
+        await _wait_for_run_status(run_id, RunStatus.completed)
+
+        async with AsyncSessionLocal() as session:
+            run = await session.get(Run, run_id)
+            assert run is not None
+            assert run.completed_at is not None
+            artifacts = list(
+                (
+                    await session.execute(
+                        select(Artifact).where(Artifact.run_id == run_id).order_by(Artifact.path)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            retry_event = (
+                await session.execute(
+                    select(Event)
+                    .where(Event.run_id == run_id, Event.type == "run_retry_started")
+                    .order_by(Event.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one()
+
+        paths = {artifact.path for artifact in artifacts}
+        assert retry_event.payload == {"resume_from": "stage3_risk"}
+        assert any(path.startswith("stage3_risk/") for path in paths)
+        assert any(path.startswith("stage4_demand/") for path in paths)
+        assert any(path.startswith("stage5_strategy/") for path in paths)
+        assert "final_report.md" in paths
+        assert "audit.md" in paths
+        stage1_count_after = sum(1 for path in paths if path.startswith("stage1_foundation/"))
+        assert stage1_count_after == stage1_count_before
+    finally:
+        await _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_retry_cancelled_run_resumes_after_last_advanced_stage(
+    client: httpx.AsyncClient,
+) -> None:
+    run_id = await _create_failed_run_ready_for_stage3_retry()
+    try:
+        async with AsyncSessionLocal() as session:
+            run = await session.get(Run, run_id)
+            assert run is not None
+            run.status = RunStatus.cancelled
+            session.add(
+                Event(
+                    run_id=run_id,
+                    type="run_cancelled",
+                    payload={"reason": "user_request"},
+                    agent="system",
+                )
+            )
+            await session.commit()
+
+        retry = await client.post(f"/runs/{run_id}/retry")
+        assert retry.status_code == 204, retry.text
+
+        await _wait_for_run_status(run_id, RunStatus.completed)
+
+        async with AsyncSessionLocal() as session:
+            run = await session.get(Run, run_id)
+            assert run is not None
+            assert run.completed_at is not None
+            retry_event = (
+                await session.execute(
+                    select(Event)
+                    .where(Event.run_id == run_id, Event.type == "run_retry_started")
+                    .order_by(Event.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one()
+            paths = {
+                artifact.path
+                for artifact in (
+                    await session.execute(select(Artifact).where(Artifact.run_id == run_id))
+                )
+                .scalars()
+                .all()
+            }
+
+        assert retry_event.payload == {"resume_from": "stage3_risk"}
+        assert any(path.startswith("stage3_risk/") for path in paths)
+        assert any(path.startswith("stage4_demand/") for path in paths)
+        assert any(path.startswith("stage5_strategy/") for path in paths)
+        assert "final_report.md" in paths
+        assert "audit.md" in paths
+    finally:
+        await _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_active_worker_marks_run_cancelled(
+    client: httpx.AsyncClient,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        run = Run(
+            user_id=SINGLETON_USER_ID,
+            task_id="market_entry",
+            goal="Cancel orphaned run",
+            status=RunStatus.running,
+            model_snapshot={"settings": {}, "document_ids": []},
+        )
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    try:
+        cancel = await client.post(f"/runs/{run_id}/cancel")
+        assert cancel.status_code == 204, cancel.text
+
+        async with AsyncSessionLocal() as session:
+            run = await session.get(Run, run_id)
+            assert run is not None
+            events = (
+                (
+                    await session.execute(
+                        select(Event)
+                        .where(
+                            Event.run_id == run_id,
+                            Event.type.in_(("cancel_ack", "run_cancelled")),
+                        )
+                        .order_by(Event.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        assert run.status == RunStatus.cancelled
+        assert run.completed_at is not None
+        assert [(event.type, event.payload) for event in events] == [
+            ("cancel_ack", {"status": "cancelled", "reason": "no_active_task"}),
+            ("run_cancelled", {"reason": "no_active_task"}),
+        ]
+    finally:
+        await _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_non_terminal_resume_status(client: httpx.AsyncClient) -> None:
+    create = await client.post(
+        "/runs",
+        json={
+            "task_type": "market_entry",
+            "goal": "Plan market entry",
+            "document_ids": [],
+        },
+    )
+    assert create.status_code == 201, create.text
+    run_id = uuid.UUID(create.json()["run_id"])
+    try:
+        retry = await client.post(f"/runs/{run_id}/retry")
+        assert retry.status_code == 409
+        assert retry.json()["detail"] == "only failed or cancelled runs can be retried"
+    finally:
+        await _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_failed_run_without_saved_answers(
+    client: httpx.AsyncClient,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        run = Run(
+            user_id=SINGLETON_USER_ID,
+            task_id="market_entry",
+            goal="No answers",
+            status=RunStatus.failed,
+            model_snapshot={"settings": {}, "document_ids": []},
+        )
+        session.add(run)
+        await session.commit()
+        run_id = run.id
+
+    try:
+        retry = await client.post(f"/runs/{run_id}/retry")
+        assert retry.status_code == 409
+        assert retry.json()["detail"] == "run has no saved questionnaire answers"
     finally:
         await _cleanup_run(run_id)

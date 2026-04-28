@@ -25,13 +25,15 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from app.agents._engine.graph import build_consulting_graph
+from app.agents._engine.nodes.audit import AUDIT_PATH, REPORT_PATH
 from app.agents._engine.profile import ConsultingProfile
+from app.agents._engine.state import EvidenceRef, FramingBrief, GateVerdict, RunState
 from app.agents.budget import BudgetTracker
 from app.agents.llm import PRODUCTION_MODEL_MARKER, get_chat_model, provider_name_for
 from app.agents.market_entry.nodes.framing import build_framing_node
@@ -39,7 +41,7 @@ from app.agents.tools import build_tools_factory
 from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
-from app.models import Message, MessageRole, Run, RunStatus
+from app.models import Artifact, Evidence, Gate, Message, MessageRole, Run, RunStatus
 
 ModelFactory = Callable[[str], object]
 ModelFactoryFactory = Callable[[], Awaitable[ModelFactory]]
@@ -169,14 +171,6 @@ async def continue_after_framing(
     model_factory: ModelFactory | None = None,
 ) -> None:
     """Persist answers and drive the full pipeline through audit."""
-    settings = get_settings()
-    heartbeat_task: asyncio.Task[None] | None = None
-    timeout_triggered = asyncio.Event()
-    timeout_reason = f"timeout: exceeded {settings.run_timeout_seconds} s budget"
-    run_task = asyncio.current_task()
-    if run_task is None:  # pragma: no cover - asyncio always provides one here.
-        raise RuntimeError("continue_after_framing requires an active asyncio task")
-    cancelled = False
     try:
         factory = model_factory or await default_model_factory(run_id)
 
@@ -212,6 +206,78 @@ async def continue_after_framing(
             )
             await session.commit()
 
+        # 2. Build the framing brief from goal + answers (no second LLM call).
+        framing_brief: FramingBrief = {
+            "objective": goal,
+            "target_market": str(answers.get("target_market", "")) or "unspecified",
+            "constraints": [],
+            "questionnaire_answers": dict(answers),
+        }
+
+        initial: RunState = {
+            "run_id": str(run_id),
+            "goal": goal,
+            "framing": framing_brief,
+        }
+        await _drive_pipeline(
+            run_id,
+            profile=profile,
+            factory=factory,
+            initial=initial,
+            entry_node=None,
+        )
+    except asyncio.CancelledError:
+        await _mark_cancelled(run_id)
+        return
+    except Exception as exc:
+        logger.exception("graph execution failed for run %s", run_id)
+        await _mark_failed(run_id, reason=_exception_reason(exc))
+        return
+
+
+async def retry_failed_run(
+    run_id: uuid.UUID,
+    *,
+    profile: ConsultingProfile,
+    model_factory: ModelFactory | None = None,
+) -> None:
+    """Resume a failed run from the first incomplete durable graph node."""
+    try:
+        factory = model_factory or await default_model_factory(run_id)
+        retry_state = await _reconstruct_retry_state(run_id, profile=profile)
+        await _drive_pipeline(
+            run_id,
+            profile=profile,
+            factory=factory,
+            initial=retry_state.initial,
+            entry_node=retry_state.entry_node,
+        )
+    except asyncio.CancelledError:
+        await _mark_cancelled(run_id)
+        return
+    except Exception as exc:
+        logger.exception("retry execution failed for run %s", run_id)
+        await _mark_failed(run_id, reason=_exception_reason(exc))
+        return
+
+
+async def _drive_pipeline(
+    run_id: uuid.UUID,
+    *,
+    profile: ConsultingProfile,
+    factory: ModelFactory,
+    initial: RunState,
+    entry_node: str | None,
+) -> None:
+    settings = get_settings()
+    heartbeat_task: asyncio.Task[None] | None = None
+    timeout_triggered = asyncio.Event()
+    timeout_reason = f"timeout: exceeded {settings.run_timeout_seconds} s budget"
+    run_task = asyncio.current_task()
+    if run_task is None:  # pragma: no cover - asyncio always provides one here.
+        raise RuntimeError("run pipeline requires an active asyncio task")
+    cancelled = False
+    try:
         heartbeat_task = asyncio.create_task(
             _heartbeat_loop(
                 run_id,
@@ -222,29 +288,14 @@ async def continue_after_framing(
             )
         )
 
-        # 2. Build the framing brief from goal + answers (no second LLM call).
-        framing_brief = {
-            "objective": goal,
-            "target_market": str(answers.get("target_market", "")) or "unspecified",
-            "constraints": [],
-            "questionnaire_answers": dict(answers),
-        }
-
-        # 3. Compile the graph WITHOUT the framing node and stream node-by-node
-        #    so we can poll Run.status between nodes for cooperative cancel.
         graph = build_consulting_graph(
             profile,
             model_factory=factory,
             tools_factory=build_tools_factory(run_id, AsyncSessionLocal),
             checkpointer=None,
             include_framing=False,
+            entry_node=entry_node,
         )
-
-        initial: dict[str, Any] = {
-            "run_id": str(run_id),
-            "goal": goal,
-            "framing": framing_brief,
-        }
 
         async for _chunk in graph.astream(initial):
             # Each chunk is a {node_name: state_update} dict yielded after
@@ -294,6 +345,142 @@ async def continue_after_framing(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RetryState:
+    initial: RunState
+    entry_node: str
+
+
+async def preview_retry_resume_entry(run_id: uuid.UUID, *, profile: ConsultingProfile) -> str:
+    """Return the node a same-run retry would start from."""
+    return (await _reconstruct_retry_state(run_id, profile=profile)).entry_node
+
+
+async def _reconstruct_retry_state(
+    run_id: uuid.UUID,
+    *,
+    profile: ConsultingProfile,
+) -> RetryState:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(Run, run_id)
+        if run is None:
+            raise ValueError(f"run {run_id} not found")
+
+        message = (
+            await session.execute(
+                select(Message)
+                .where(Message.run_id == run_id, Message.role == MessageRole.user)
+                .order_by(Message.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if message is None:
+            raise ValueError("run has no saved questionnaire answers")
+        try:
+            raw_answers = json.loads(message.content)
+        except json.JSONDecodeError as exc:
+            raise ValueError("saved questionnaire answers are not valid JSON") from exc
+        if not isinstance(raw_answers, dict):
+            raise ValueError("saved questionnaire answers must be a JSON object")
+        answers = {str(key): str(value) for key, value in raw_answers.items()}
+
+        artifact_rows = list(
+            (
+                await session.execute(
+                    select(Artifact).where(Artifact.run_id == run_id).order_by(Artifact.path)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        evidence_rows = list(
+            (
+                await session.execute(
+                    select(Evidence).where(Evidence.run_id == run_id).order_by(Evidence.src_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        gate_rows = list(
+            (
+                await session.execute(
+                    select(Gate)
+                    .where(Gate.run_id == run_id)
+                    .order_by(Gate.created_at, Gate.attempt)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        artifacts = {row.path: row.content for row in artifact_rows}
+        evidence: list[EvidenceRef] = []
+        for evidence_row in evidence_rows:
+            ref: EvidenceRef = {"src_id": evidence_row.src_id, "title": evidence_row.title}
+            if evidence_row.url:
+                ref["url"] = evidence_row.url
+            evidence.append(ref)
+
+        latest_gates: dict[str, Gate] = {}
+        for gate_row in gate_rows:
+            latest_gates[gate_row.stage] = gate_row
+
+        gate_verdicts: dict[str, GateVerdict] = {}
+        stage_attempts: dict[str, int] = {}
+        for stage, gate_row in latest_gates.items():
+            target_agents = list(gate_row.target_agents or [])
+            gate_verdicts[stage] = {
+                "verdict": gate_row.verdict,
+                "stage": gate_row.stage,
+                "attempt": gate_row.attempt,
+                "gaps": list(gate_row.gaps or []),
+                "target_agents": target_agents,
+                "rationale": gate_row.rationale,
+            }
+            stage_attempts[stage] = (
+                gate_row.attempt + 1 if gate_row.verdict == "reiterate" else gate_row.attempt
+            )
+
+        snapshot = run.model_snapshot or {}
+        document_ids = snapshot.get("document_ids", []) or []
+        initial: RunState = {
+            "run_id": str(run_id),
+            "goal": run.goal,
+            "document_ids": [str(document_id) for document_id in document_ids],
+            "framing": {
+                "objective": run.goal,
+                "target_market": answers.get("target_market", "") or "unspecified",
+                "constraints": [],
+                "questionnaire_answers": answers,
+            },
+            "artifacts": artifacts,
+            "evidence": evidence,
+            "stage_attempts": stage_attempts,
+            "gate_verdicts": gate_verdicts,
+            "target_agents": None,
+        }
+        entry_node = _resume_entry_node(profile, artifacts=artifacts, gate_verdicts=gate_verdicts)
+        return RetryState(initial=initial, entry_node=entry_node)
+
+
+def _resume_entry_node(
+    profile: ConsultingProfile,
+    *,
+    artifacts: dict[str, str],
+    gate_verdicts: dict[str, GateVerdict],
+) -> str:
+    for stage in profile.stages:
+        verdict = gate_verdicts.get(stage.slug)
+        if verdict is None or verdict.get("verdict") != "advance":
+            return stage.node_name
+    if REPORT_PATH not in artifacts:
+        return "synthesis"
+    if AUDIT_PATH not in artifacts:
+        return "audit"
+    return "audit"
 
 
 async def _run_is_cancelling(run_id: uuid.UUID) -> bool:
@@ -371,5 +558,7 @@ __all__ = [
     "ModelFactory",
     "continue_after_framing",
     "default_model_factory",
+    "preview_retry_resume_entry",
+    "retry_failed_run",
     "start_framing",
 ]
