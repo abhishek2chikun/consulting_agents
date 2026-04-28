@@ -71,6 +71,18 @@ TERMINAL_RUN_STATUSES = {
 }
 
 
+def _assert_production_model(model: object, *, role: str) -> None:
+    """Reject test doubles from the production default factory path."""
+    model_type = type(model).__name__
+    model_module = type(model).__module__
+    llm_type = getattr(model, "_llm_type", None)
+    if model_module.startswith("app.testing") or llm_type == "fake-chat-model":
+        raise RuntimeError(
+            "default_model_factory resolved a scripted/fake model in the production path "
+            f"for role {role!r}: {model_module}.{model_type}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Default model factory
 # ---------------------------------------------------------------------------
@@ -95,6 +107,7 @@ async def default_model_factory(run_id: uuid.UUID | None = None) -> ModelFactory
     async with AsyncSessionLocal() as session:
         for role in roles:
             resolved: object = await get_chat_model(role, session=session)
+            _assert_production_model(resolved, role=role)
             if run_id is not None:
                 provider = provider_name_for(resolved)  # type: ignore[arg-type]
                 resolved = _attach_budget_tracker(resolved, run_id=run_id, provider=provider)

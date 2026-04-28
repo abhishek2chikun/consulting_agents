@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class CreateRunRequest(BaseModel):
+class StrictRequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class CreateRunRequest(StrictRequestModel):
     task_type: str = Field(min_length=1)
     goal: str = Field(min_length=1)
     document_ids: list[str] = Field(default_factory=list)
@@ -17,7 +21,7 @@ class CreateRunResponse(BaseModel):
     run_id: uuid.UUID
 
 
-class SubmitAnswersRequest(BaseModel):
+class SubmitAnswersRequest(StrictRequestModel):
     answers: dict[str, str]
 
 
