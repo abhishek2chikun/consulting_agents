@@ -89,7 +89,11 @@ class ConsultingProfile:
         self.load_prompt("synthesis")
         self.load_prompt("audit")
         self.load_prompt("reviewer")
-        stage_slugs = {stage.slug for stage in self.stages}
+        stage_slugs: set[str] = set()
+        for stage in self.stages:
+            if stage.slug in stage_slugs:
+                raise ValueError(f"Duplicate stage slug in profile {self.slug!r}: {stage.slug!r}")
+            stage_slugs.add(stage.slug)
         for stage_slug in self.reviewer_prompt_for_stage:
             if stage_slug not in stage_slugs:
                 raise ValueError(
