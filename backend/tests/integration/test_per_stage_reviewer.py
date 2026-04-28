@@ -100,6 +100,7 @@ async def test_reviewer_loads_stage_specific_prompt(run_id: uuid.UUID) -> None:
 
     system_prompt = await _invoke(run_id, fake, profile)
 
+    assert "# Reviewer — Strict Stage Critic" in system_prompt
     assert "Foundation-specific reviewer checks" in system_prompt
 
 
@@ -121,7 +122,7 @@ async def test_reviewer_injects_stage_skills(run_id: uuid.UUID) -> None:
     system_prompt = await _invoke(run_id, fake, profile)
 
     assert "## Applicable Consulting Skills" in system_prompt
-    assert "Make every material claim traceable to reliable evidence" in system_prompt
+    assert "# Evidence Discipline" in system_prompt
 
 
 def test_pricing_and_profitability_reviewers_use_own_prompt_packages() -> None:
