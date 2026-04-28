@@ -10,9 +10,41 @@ from sqlalchemy import select
 from app.agents.market_entry.profile import MARKET_ENTRY_PROFILE
 from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
-from app.models import SINGLETON_USER_ID, Artifact, Event, Run, RunStatus
+from app.models import SINGLETON_USER_ID, Artifact, Event, Message, Run, RunStatus
 from app.workers import run_worker
 from app.workers.run_worker import continue_after_framing
+
+
+async def _create_run(*, status: RunStatus = RunStatus.questioning) -> Run:
+    async with AsyncSessionLocal() as session:
+        run = Run(
+            user_id=SINGLETON_USER_ID,
+            task_id="market_entry",
+            goal="Enter EU EV-charging market",
+            status=status,
+        )
+        session.add(run)
+        await session.flush()
+        session.add(
+            Artifact(
+                run_id=run.id,
+                path="framing/questionnaire.json",
+                kind="json",
+                content='{"items": []}',
+            )
+        )
+        await session.commit()
+        await session.refresh(run)
+        return run
+
+
+async def _wait_for(predicate: callable, *, timeout: float = 3.0) -> None:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if await predicate():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("condition not met before timeout")
 
 
 @pytest.mark.asyncio
@@ -23,25 +55,8 @@ async def test_continue_after_framing_fails_when_timeout_budget_is_exceeded(
     monkeypatch.setenv("HEARTBEAT_INTERVAL_SECONDS", "1")
     get_settings.cache_clear()
 
-    async with AsyncSessionLocal() as session:
-        run = Run(
-            user_id=SINGLETON_USER_ID,
-            task_id="market_entry",
-            goal="Enter EU EV-charging market",
-            status=RunStatus.questioning,
-        )
-        session.add(run)
-        await session.flush()
-        run_id = run.id
-        session.add(
-            Artifact(
-                run_id=run_id,
-                path="framing/questionnaire.json",
-                kind="json",
-                content='{"items": []}',
-            )
-        )
-        await session.commit()
+    run = await _create_run()
+    run_id = run.id
 
     class BlockingStructuredModel:
         def with_structured_output(self, _schema: object) -> BlockingStructuredModel:
@@ -104,25 +119,8 @@ async def test_continue_after_framing_prefers_explicit_cancel_over_timeout(
     monkeypatch.setenv("HEARTBEAT_INTERVAL_SECONDS", "1")
     get_settings.cache_clear()
 
-    async with AsyncSessionLocal() as session:
-        run = Run(
-            user_id=SINGLETON_USER_ID,
-            task_id="market_entry",
-            goal="Enter EU EV-charging market",
-            status=RunStatus.questioning,
-        )
-        session.add(run)
-        await session.flush()
-        run_id = run.id
-        session.add(
-            Artifact(
-                run_id=run_id,
-                path="framing/questionnaire.json",
-                kind="json",
-                content='{"items": []}',
-            )
-        )
-        await session.commit()
+    run = await _create_run()
+    run_id = run.id
 
     class BlockingStructuredModel:
         def with_structured_output(self, _schema: object) -> BlockingStructuredModel:
@@ -136,7 +134,12 @@ async def test_continue_after_framing_prefers_explicit_cancel_over_timeout(
         return BlockingStructuredModel()
 
     async def flip_to_cancelling() -> None:
-        await asyncio.sleep(0.5)
+        async def _started() -> bool:
+            async with AsyncSessionLocal() as session:
+                run = await session.get(Run, run_id)
+                return run is not None and run.started_at is not None
+
+        await _wait_for(_started)
         async with AsyncSessionLocal() as session:
             run = await session.get(Run, run_id)
             assert run is not None
@@ -193,6 +196,84 @@ async def test_continue_after_framing_prefers_explicit_cancel_over_timeout(
             flipper.cancel()
             try:
                 await flipper
+            except asyncio.CancelledError:
+                pass
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_continue_after_framing_preserves_persisted_cancelling_before_startup() -> None:
+    run = await _create_run(status=RunStatus.cancelling)
+
+    def factory(_role: str) -> object:
+        raise AssertionError("worker must not start models for an already cancelling run")
+
+    await continue_after_framing(
+        run.id,
+        answers={"time_horizon": "12 months"},
+        profile=MARKET_ENTRY_PROFILE,
+        model_factory=factory,
+    )
+
+    async with AsyncSessionLocal() as session:
+        persisted = await session.get(Run, run.id)
+        assert persisted is not None
+        messages = (
+            (await session.execute(select(Message).where(Message.run_id == run.id))).scalars().all()
+        )
+
+    assert persisted.status == RunStatus.cancelled
+    assert persisted.started_at is None
+    assert persisted.completed_at is not None
+    assert messages == []
+
+
+@pytest.mark.asyncio
+async def test_continue_after_framing_marks_cancelled_when_task_is_cancelled_during_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    run = await _create_run()
+    entered_factory = asyncio.Event()
+
+    async def blocking_default_model_factory(_run_id: object) -> object:
+        entered_factory.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(run_worker, "default_model_factory", blocking_default_model_factory)
+
+    task = asyncio.create_task(
+        continue_after_framing(
+            run.id,
+            answers={"time_horizon": "12 months"},
+            profile=MARKET_ENTRY_PROFILE,
+            model_factory=None,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(entered_factory.wait(), timeout=2.0)
+        task.cancel()
+        await task
+
+        async def _terminal() -> bool:
+            async with AsyncSessionLocal() as session:
+                persisted = await session.get(Run, run.id)
+                return persisted is not None and persisted.status == RunStatus.cancelled
+
+        await _wait_for(_terminal)
+
+        async with AsyncSessionLocal() as session:
+            persisted = await session.get(Run, run.id)
+            assert persisted is not None
+
+        assert persisted.completed_at is not None
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
             except asyncio.CancelledError:
                 pass
         get_settings.cache_clear()
