@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from app.agents._engine.paths import normalize_artifact_path
 from app.agents._engine.profile import ConsultingProfile
+from app.agents._engine.skills import inject_skills
 from app.agents._engine.state import RunState
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
@@ -39,7 +40,7 @@ def build_audit_node(
     *, model: object, profile: ConsultingProfile | None = None
 ) -> Callable[[RunState], Awaitable[RunState]]:
     profile = profile or _default_profile()
-    system_prompt = profile.load_prompt("audit")
+    system_prompt = inject_skills(profile.load_prompt("audit"), profile.audit_skills)
 
     async def audit_node(state: RunState) -> RunState:
         run_uuid = uuid.UUID(state["run_id"])

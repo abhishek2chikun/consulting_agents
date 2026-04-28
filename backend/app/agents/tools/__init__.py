@@ -28,4 +28,19 @@ def build_tools(
     ]
 
 
-__all__ = ["build_tools", "rag_search"]
+def build_tools_factory(
+    run_id: uuid.UUID,
+    session_factory: Callable[[], AsyncSession],
+) -> Callable[[], list[BaseTool | Any]]:
+    """Build the V1.6 stage tool factory for run-scoped ReAct loops."""
+
+    def _factory() -> list[BaseTool | Any]:
+        return [
+            build_web_search(run_id, session_factory),
+            build_rag_search(run_id, session_factory),
+        ]
+
+    return _factory
+
+
+__all__ = ["build_tools", "build_tools_factory", "rag_search"]

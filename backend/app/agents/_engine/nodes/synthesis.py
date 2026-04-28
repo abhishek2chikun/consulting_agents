@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy import select
 
 from app.agents._engine.profile import ConsultingProfile
+from app.agents._engine.skills import inject_skills
 from app.agents._engine.state import RunState
 from app.core.db import AsyncSessionLocal
 from app.core.events import publish
@@ -55,7 +56,7 @@ def build_synthesis_node(
     *, model: object, profile: ConsultingProfile | None = None
 ) -> Callable[[RunState], Awaitable[RunState]]:
     profile = profile or _default_profile()
-    system_prompt = profile.load_prompt("synthesis")
+    system_prompt = inject_skills(profile.load_prompt("synthesis"), profile.synthesis_skills)
 
     # Bounded self-heal: if the model invents citations, give it a
     # second (and third) chance with the unknowns spelled out, then

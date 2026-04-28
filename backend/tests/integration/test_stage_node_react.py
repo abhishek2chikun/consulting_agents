@@ -11,6 +11,7 @@ import pytest_asyncio
 from langchain_core.messages import AIMessage, ToolMessage
 from sqlalchemy import select
 
+from app.agents._engine.profile import ConsultingProfile, ProfileStage
 from app.agents.market_entry.nodes.stage import make_stage_node
 from app.agents.market_entry.state import RunState
 from app.core.config import get_settings
@@ -51,6 +52,28 @@ class FailingFakeTool:
 class UnsupportedBindFakeChatModel(FakeChatModel):
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
+
+
+def _profile_without_workers() -> ConsultingProfile:
+    return ConsultingProfile(
+        slug="test_react_profile",
+        display_name="Test React Profile",
+        prompts_package="app.agents.market_entry.prompts",
+        framing_prompt="framing.md",
+        stages=(
+            ProfileStage(
+                slug="stage1_foundation",
+                node_name="stage1_foundation",
+                next_stage_node="synthesis",
+                prompt_file="stage1_foundation.md",
+                required_skills=("strategic-analysis", "market-sizing"),
+            ),
+        ),
+        reviewer_prompt_package="app.agents.market_entry.prompts",
+        reviewer_prompt="reviewer.md",
+        synthesis_prompt="synthesis.md",
+        audit_prompt="audit.md",
+    )
 
 
 @pytest_asyncio.fixture
@@ -116,7 +139,12 @@ async def test_stage_node_executes_tool_call_before_structured_output(
         ],
         structured_responses=[_payload()],
     )
-    node = make_stage_node("stage1_foundation", model=fake, tools=[tool])
+    node = make_stage_node(
+        "stage1_foundation",
+        model=fake,
+        tools=[tool],
+        profile=_profile_without_workers(),
+    )
 
     out = await node(_state(run_id))
 
@@ -144,7 +172,7 @@ async def test_stage_node_no_tools_fallback_does_not_emit_no_tool_warning(
     run_id: uuid.UUID,
 ) -> None:
     fake = FakeChatModel(structured_responses=[_payload()])
-    node = make_stage_node("stage1_foundation", model=fake)
+    node = make_stage_node("stage1_foundation", model=fake, profile=_profile_without_workers())
 
     await node(_state(run_id))
 
@@ -176,7 +204,12 @@ async def test_stage_node_warns_when_tools_provided_but_model_uses_none(
         responses=[AIMessage(content="No tool needed")],
         structured_responses=[_payload()],
     )
-    node = make_stage_node("stage1_foundation", model=fake, tools=[FakeTool()])
+    node = make_stage_node(
+        "stage1_foundation",
+        model=fake,
+        tools=[FakeTool()],
+        profile=_profile_without_workers(),
+    )
 
     await node(_state(run_id))
 
@@ -233,7 +266,12 @@ async def test_stage_node_max_iteration_cap_still_finalizes(
         ],
         structured_responses=[_payload()],
     )
-    node = make_stage_node("stage1_foundation", model=fake, tools=[tool])
+    node = make_stage_node(
+        "stage1_foundation",
+        model=fake,
+        tools=[tool],
+        profile=_profile_without_workers(),
+    )
 
     await node(_state(run_id))
 
@@ -250,7 +288,12 @@ async def test_stage_node_bind_tools_not_implemented_falls_back_and_finalizes(
         responses=[AIMessage(content="No tool needed")],
         structured_responses=[_payload()],
     )
-    node = make_stage_node("stage1_foundation", model=fake, tools=[FakeTool()])
+    node = make_stage_node(
+        "stage1_foundation",
+        model=fake,
+        tools=[FakeTool()],
+        profile=_profile_without_workers(),
+    )
 
     out = await node(_state(run_id))
 
@@ -294,7 +337,12 @@ async def test_stage_node_unknown_tool_name_appends_error_and_finalizes(
         ],
         structured_responses=[_payload()],
     )
-    node = make_stage_node("stage1_foundation", model=fake, tools=[FakeTool()])
+    node = make_stage_node(
+        "stage1_foundation",
+        model=fake,
+        tools=[FakeTool()],
+        profile=_profile_without_workers(),
+    )
 
     await node(_state(run_id))
 
@@ -318,7 +366,12 @@ async def test_stage_node_malformed_tool_call_missing_name_appends_error_and_fin
         ],
         structured_responses=[_payload()],
     )
-    node = make_stage_node("stage1_foundation", model=fake, tools=[FakeTool()])
+    node = make_stage_node(
+        "stage1_foundation",
+        model=fake,
+        tools=[FakeTool()],
+        profile=_profile_without_workers(),
+    )
 
     await node(_state(run_id))
 
@@ -350,7 +403,12 @@ async def test_stage_node_invokes_async_tool_with_default_args_when_args_missing
         ],
         structured_responses=[_payload()],
     )
-    node = make_stage_node("stage1_foundation", model=fake, tools=[tool])
+    node = make_stage_node(
+        "stage1_foundation",
+        model=fake,
+        tools=[tool],
+        profile=_profile_without_workers(),
+    )
 
     await node(_state(run_id))
 
@@ -384,7 +442,12 @@ async def test_stage_node_known_tool_failure_appends_error_and_finalizes(
         ],
         structured_responses=[_payload()],
     )
-    node = make_stage_node("stage1_foundation", model=fake, tools=[FailingFakeTool()])
+    node = make_stage_node(
+        "stage1_foundation",
+        model=fake,
+        tools=[FailingFakeTool()],
+        profile=_profile_without_workers(),
+    )
 
     out = await node(_state(run_id))
 
