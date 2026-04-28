@@ -63,7 +63,7 @@ async def sweep_stale_runs(session: AsyncSession | None = None) -> int:
         await active_session.commit()
 
         for run_id in run_ids:
-            await publish(run_id, "run_failed", {"reason": reason}, agent="system")
+            await publish(run_id, "system.run_failed", {"reason": reason}, agent="system")
 
         return len(run_ids)
     finally:

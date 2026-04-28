@@ -63,7 +63,7 @@ async def test_sweep_stale_runs_fails_stale_running_rows() -> None:
     assert persisted.completed_at is not None
     assert persisted.completed_at >= persisted.heartbeat_at
     assert len(events) == 1
-    assert events[0].type == "run_failed"
+    assert events[0].type == "system.run_failed"
     assert events[0].agent == "system"
     assert events[0].payload == {"reason": "staleness: no heartbeat for >5 minutes"}
 
