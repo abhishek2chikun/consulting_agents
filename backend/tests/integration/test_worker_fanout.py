@@ -207,23 +207,26 @@ async def test_workers_fan_out_and_merge_output_state_and_persistence(run_id: uu
         out["artifacts"]["stage1_foundation/regulatory/nested/findings.md"] == "Reg finding [^r1]."
     )
     assert {e["src_id"] for e in out["evidence"]} == {"m1", "c1", "r1"}
-    assert out["worker_outputs"]["stage1_foundation"] == {
-        "market_sizing": {
-            "summary": "Market complete",
-            "artifact_paths": ["stage1_foundation/market_sizing/findings.md"],
-            "evidence_ids": ["m1"],
-        },
-        "customer": {
-            "summary": "Customer complete",
-            "artifact_paths": ["stage1_foundation/customer/findings.md"],
-            "evidence_ids": ["c1"],
-        },
-        "regulatory": {
-            "summary": "Reg complete",
-            "artifact_paths": ["stage1_foundation/regulatory/nested/findings.md"],
-            "evidence_ids": ["r1"],
-        },
-    }
+    market_worker_output = out["worker_outputs"]["stage1_foundation"]["market_sizing"]
+    assert set(market_worker_output) == {"artifacts", "evidence", "summary"}
+    assert market_worker_output["summary"] == "Market complete"
+    assert market_worker_output["artifacts"] == [
+        {
+            "path": "stage1_foundation/market_sizing/findings.md",
+            "content": "Market sizing [^m1].",
+            "kind": "markdown",
+        }
+    ]
+    assert market_worker_output["evidence"] == [
+        {
+            "src_id": "m1",
+            "title": "Market source",
+            "url": None,
+            "snippet": "",
+            "kind": "web",
+            "provider": "stage_node",
+        }
+    ]
 
     async with AsyncSessionLocal() as session:
         artifact_paths = sorted(
@@ -317,13 +320,25 @@ async def test_worker_reiterate_with_worker_slug_runs_only_target_worker(
         "stage1_foundation": {
             "market_sizing": {
                 "summary": "Accepted market",
-                "artifact_paths": ["stage1_foundation/market_sizing/findings.md"],
-                "evidence_ids": ["m1"],
+                "artifacts": [
+                    {
+                        "path": "stage1_foundation/market_sizing/findings.md",
+                        "content": "Accepted market [^m1].",
+                        "kind": "markdown",
+                    }
+                ],
+                "evidence": [{"src_id": "m1", "title": "Market source"}],
             },
             "regulatory": {
                 "summary": "Accepted regulatory",
-                "artifact_paths": ["stage1_foundation/regulatory/findings.md"],
-                "evidence_ids": ["r1"],
+                "artifacts": [
+                    {
+                        "path": "stage1_foundation/regulatory/findings.md",
+                        "content": "Accepted regulatory [^r1].",
+                        "kind": "markdown",
+                    }
+                ],
+                "evidence": [{"src_id": "r1", "title": "Reg source"}],
             },
         }
     }
@@ -346,8 +361,23 @@ async def test_worker_reiterate_with_worker_slug_runs_only_target_worker(
     )
     assert out["worker_outputs"]["stage1_foundation"]["customer"] == {
         "summary": "Customer retry complete",
-        "artifact_paths": ["stage1_foundation/customer/findings.md"],
-        "evidence_ids": ["c2"],
+        "artifacts": [
+            {
+                "path": "stage1_foundation/customer/findings.md",
+                "content": "New customer [^c2].",
+                "kind": "markdown",
+            }
+        ],
+        "evidence": [
+            {
+                "src_id": "c2",
+                "title": "Customer source 2",
+                "url": None,
+                "snippet": "",
+                "kind": "web",
+                "provider": "stage_node",
+            }
+        ],
     }
 
 
@@ -438,6 +468,55 @@ async def test_worker_fanout_removes_write_artifact_tool(run_id: uuid.UUID) -> N
     assert {event.agent for event in event_rows if event.type == "artifact_update"} == {
         "stage1_foundation.customer"
     }
+
+
+@pytest.mark.asyncio
+async def test_worker_with_tools_but_no_tool_calls_emits_dotted_warning(
+    run_id: uuid.UUID,
+) -> None:
+    lookup = RecordingTool("lookup_market")
+    fake = FakeChatModel(
+        responses=[AIMessage(content="No tool needed")],
+        structured_responses=[
+            {
+                "artifacts": [{"path": "findings.md", "content": "Customer [^c4]."}],
+                "evidence": [{"src_id": "c4", "title": "Customer source 4"}],
+                "summary": "Customer complete",
+            }
+        ],
+    )
+    node = make_stage_node(
+        "stage1_foundation",
+        model=fake,
+        tools=[lookup],
+        profile=_profile(workers=_workers()),
+    )
+    state = _state(run_id)
+    state["target_agents"] = ["customer"]
+
+    await node(state)
+
+    async with AsyncSessionLocal() as session:
+        warning_rows = (
+            (
+                await session.execute(
+                    select(Event).where(
+                        Event.run_id == run_id,
+                        Event.type == "agent_message",
+                        Event.agent == "stage1_foundation.customer",
+                        Event.payload["text"].astext.contains(
+                            "produced StageOutput without tool use"
+                        ),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(warning_rows) == 1
+    assert warning_rows[0].payload["text"] == (
+        "stage1_foundation.customer: produced StageOutput without tool use"
+    )
 
 
 @pytest.mark.asyncio

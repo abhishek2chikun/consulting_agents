@@ -368,6 +368,21 @@ def _merge_worker_outputs(
     )
 
 
+def _worker_output_payload(
+    stage_slug: str, worker: WorkerSpec, result: StageOutput
+) -> dict[str, Any]:
+    return {
+        "artifacts": [
+            artifact.model_copy(
+                update={"path": _prefixed_worker_path(stage_slug, worker.slug, artifact.path)}
+            ).model_dump()
+            for artifact in result.artifacts
+        ],
+        "evidence": [evidence.model_dump() for evidence in result.evidence],
+        "summary": result.summary,
+    }
+
+
 async def _run_worker_fanout(
     *,
     stage: ProfileStage,
@@ -375,15 +390,15 @@ async def _run_worker_fanout(
     state: RunState,
     model: object,
     tools: list[object],
-) -> tuple[StageOutput, dict[str, dict[str, Any]], dict[str, str]]:
+) -> tuple[StageOutput, dict[str, dict[str, Any]], dict[str, str], dict[str, int]]:
     semaphore = asyncio.Semaphore(get_settings().worker_concurrency)
     worker_tools = _worker_fanout_tools(tools)
     workers = _selected_workers(stage, state)
 
-    async def run_worker(worker: WorkerSpec) -> tuple[WorkerSpec, StageOutput]:
+    async def run_worker(worker: WorkerSpec) -> tuple[WorkerSpec, StageOutput, int]:
         async with semaphore:
             agent_id = f"{stage.slug}.{worker.slug}"
-            result, _ = await _run_react_stage(
+            result, executed_tool_calls = await _run_react_stage(
                 agent_id=agent_id,
                 system_prompt=inject_skills(
                     profile.load_worker_prompt(stage.slug, worker.slug),
@@ -393,27 +408,25 @@ async def _run_worker_fanout(
                 model=model,
                 tools=worker_tools,
             )
-            return worker, result
+            return worker, result, executed_tool_calls
 
     worker_results = await asyncio.gather(*(run_worker(worker) for worker in workers))
-    merged = _merge_worker_outputs(stage_slug=stage.slug, worker_results=list(worker_results))
+    stage_outputs = [(worker, result) for worker, result, _ in worker_results]
+    merged = _merge_worker_outputs(stage_slug=stage.slug, worker_results=stage_outputs)
     compact = {
-        worker.slug: {
-            "summary": result.summary,
-            "artifact_paths": [
-                _prefixed_worker_path(stage.slug, worker.slug, artifact.path)
-                for artifact in result.artifacts
-            ],
-            "evidence_ids": [evidence.src_id for evidence in result.evidence],
-        }
-        for worker, result in worker_results
+        worker.slug: _worker_output_payload(stage.slug, worker, result)
+        for worker, result, _ in worker_results
     }
     artifact_agents = {
         _prefixed_worker_path(stage.slug, worker.slug, artifact.path): f"{stage.slug}.{worker.slug}"
-        for worker, result in worker_results
+        for worker, result, _ in worker_results
         for artifact in result.artifacts
     }
-    return merged, compact, artifact_agents
+    worker_tool_counts = {
+        f"{stage.slug}.{worker.slug}": executed_tool_calls
+        for worker, _, executed_tool_calls in worker_results
+    }
+    return merged, compact, artifact_agents, worker_tool_counts
 
 
 def make_stage_node(
@@ -444,9 +457,10 @@ def make_stage_node(
 
         worker_outputs: dict[str, dict[str, Any]] | None = None
         artifact_agents: dict[str, str] | None = None
+        worker_tool_counts: dict[str, int] | None = None
         executed_tool_calls = 0
         if stage and stage.workers:
-            result, worker_outputs, artifact_agents = await _run_worker_fanout(
+            result, worker_outputs, artifact_agents, worker_tool_counts = await _run_worker_fanout(
                 stage=stage,
                 profile=profile,
                 state=state,
@@ -476,6 +490,15 @@ def make_stage_node(
                 {"text": f"{stage_slug}: produced StageOutput without tool use"},
                 agent=stage_slug,
             )
+        if worker_tool_counts is not None and available_tools:
+            for agent_id, worker_executed_tool_calls in worker_tool_counts.items():
+                if worker_executed_tool_calls == 0:
+                    await publish(
+                        run_uuid,
+                        "agent_message",
+                        {"text": f"{agent_id}: produced StageOutput without tool use"},
+                        agent=agent_id,
+                    )
         if result.summary:
             await publish(
                 run_uuid,
