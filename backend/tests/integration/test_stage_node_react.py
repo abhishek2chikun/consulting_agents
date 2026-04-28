@@ -41,6 +41,13 @@ class AsyncFakeTool:
         return "async tool result: market CAGR is 14%"
 
 
+class FailingFakeTool:
+    name = "failing_lookup"
+
+    def invoke(self, args: dict[str, Any]) -> str:
+        raise ValueError("invalid lookup arguments")
+
+
 class UnsupportedBindFakeChatModel(FakeChatModel):
     def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
@@ -355,3 +362,46 @@ async def test_stage_node_invokes_async_tool_with_default_args_when_args_missing
         and message.content == "async tool result: market CAGR is 14%"
         for message in structured_messages
     )
+
+
+@pytest.mark.asyncio
+async def test_stage_node_known_tool_failure_appends_error_and_finalizes(
+    run_id: uuid.UUID,
+) -> None:
+    fake = FakeChatModel(
+        responses=[
+            AIMessage(
+                content="Try failing tool",
+                tool_calls=[
+                    {
+                        "name": "failing_lookup",
+                        "args": {"query": "bad"},
+                        "id": "call_failing",
+                    }
+                ],
+            ),
+            AIMessage(content="Ready to finalize"),
+        ],
+        structured_responses=[_payload()],
+    )
+    node = make_stage_node("stage1_foundation", model=fake, tools=[FailingFakeTool()])
+
+    out = await node(_state(run_id))
+
+    assert out["artifacts"]["stage1_foundation/findings.md"].startswith("Finding")
+    _, structured_messages = fake.structured_calls[0]
+    assert any(
+        isinstance(message, ToolMessage)
+        and message.tool_call_id == "call_failing"
+        and "Tool execution failed for failing_lookup: ValueError: invalid lookup arguments"
+        in str(message.content)
+        for message in structured_messages
+    )
+
+    async with AsyncSessionLocal() as session:
+        artifact_rows = (
+            (await session.execute(select(Artifact).where(Artifact.run_id == run_id)))
+            .scalars()
+            .all()
+        )
+    assert len(artifact_rows) == 1

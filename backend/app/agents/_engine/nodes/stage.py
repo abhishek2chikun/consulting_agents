@@ -205,13 +205,16 @@ def make_stage_node(
                         )
                         continue
                     tool = tools_by_name.get(name)
-                    content = (
-                        f"Tool not found: {name}"
-                        if tool is None
-                        else str(await _invoke_tool(tool, args))
-                    )
-                    if tool is not None:
+                    if tool is None:
+                        content = f"Tool not found: {name}"
+                    else:
                         executed_tool_calls += 1
+                        try:
+                            content = str(await _invoke_tool(tool, args))
+                        except Exception as exc:
+                            content = (
+                                f"Tool execution failed for {name}: {type(exc).__name__}: {exc}"
+                            )
                     messages.append(
                         ToolMessage(
                             content=content,
