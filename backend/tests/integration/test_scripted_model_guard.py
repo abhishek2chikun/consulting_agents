@@ -46,6 +46,21 @@ async def test_post_runs_rejects_model_factory_field(client: httpx.AsyncClient) 
 
 
 @pytest.mark.asyncio
+async def test_post_runs_rejects_testing_field(client: httpx.AsyncClient) -> None:
+    response = await client.post(
+        "/runs",
+        json={
+            "task_type": "market_entry",
+            "goal": "Evaluate expansion into a new region",
+            "document_ids": [],
+            "testing": {"scripted_model": True},
+        },
+    )
+
+    assert response.status_code in {400, 422}
+
+
+@pytest.mark.asyncio
 async def test_submit_answers_rejects_model_factory_field(client: httpx.AsyncClient) -> None:
     response = await client.post(
         f"/runs/{uuid.uuid4()}/answers",
