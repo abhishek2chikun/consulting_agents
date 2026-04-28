@@ -156,6 +156,28 @@ def test_validate_reads_every_worker_prompt_and_rejects_missing_worker_prompt() 
         profile.validate()
 
 
+def test_validate_rejects_duplicate_stage_slugs_with_stage_slug_visible() -> None:
+    profile = make_profile(
+        stages=(
+            ProfileStage(
+                slug="duplicate_stage",
+                node_name="stage1_foundation",
+                next_stage_node="stage2_competitive",
+                prompt_file="stage1_foundation.md",
+            ),
+            ProfileStage(
+                slug="duplicate_stage",
+                node_name="stage2_competitive",
+                next_stage_node="synthesis",
+                prompt_file="stage2_competitive.md",
+            ),
+        )
+    )
+
+    with pytest.raises(ValueError, match="duplicate_stage"):
+        profile.validate()
+
+
 def test_validate_rejects_duplicate_worker_slugs_with_stage_slug_visible() -> None:
     profile = make_profile(
         stages=(
