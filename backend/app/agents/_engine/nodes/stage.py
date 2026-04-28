@@ -144,13 +144,20 @@ async def _invoke_tool(tool: object, args: object) -> object:
 
 def _prefixed_worker_path(stage_slug: str, worker_slug: str, path: str) -> str:
     prefix = f"{stage_slug}/{worker_slug}/"
-    clean = path.lstrip("/")
+    if not path or path.startswith("/"):
+        raise ValueError(f"invalid worker artifact path: {path!r}")
+    clean = path
     if clean.startswith(prefix):
+        remainder = clean.removeprefix(prefix)
+        if not remainder or ".." in remainder.split("/"):
+            raise ValueError(f"invalid worker artifact path: {path!r}")
         return clean
     if clean.startswith(f"{stage_slug}/"):
         clean = clean.removeprefix(f"{stage_slug}/")
     if clean.startswith(f"{worker_slug}/"):
         clean = clean.removeprefix(f"{worker_slug}/")
+    if not clean or ".." in clean.split("/"):
+        raise ValueError(f"invalid worker artifact path: {path!r}")
     return f"{prefix}{clean}"
 
 
