@@ -6,10 +6,21 @@ import pytest
 
 from app.core.config import Settings
 
+V16_ENV_VARS = (
+    "RUN_TIMEOUT_SECONDS",
+    "HEARTBEAT_INTERVAL_SECONDS",
+    "STALE_RUN_THRESHOLD_SECONDS",
+    "WORKER_CONCURRENCY",
+    "REACT_MAX_ITERATIONS",
+)
 
-def test_v16_settings_defaults() -> None:
+
+def test_v16_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """The 5 new V1.6 fields should have the documented defaults."""
-    settings = Settings()
+    for env_var in V16_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+
+    settings = Settings(_env_file=None)
     assert settings.run_timeout_seconds == 7200
     assert settings.heartbeat_interval_seconds == 30
     assert settings.stale_run_threshold_seconds == 300
