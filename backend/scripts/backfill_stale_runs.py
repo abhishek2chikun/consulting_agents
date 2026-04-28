@@ -83,7 +83,7 @@ async def backfill_stale_runs(*, dry_run: bool = False, session: AsyncSession | 
                         "run_id": run_id,
                         "type": BACKFILL_EVENT_TYPE,
                         "agent": BACKFILL_AGENT,
-                        "payload": {"rationale": BACKFILL_RATIONALE},
+                        "payload": {"reason": BACKFILL_RATIONALE},
                     }
                     for run_id in transitioned_run_ids
                 ],
