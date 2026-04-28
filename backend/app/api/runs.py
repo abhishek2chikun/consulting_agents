@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -34,6 +35,8 @@ from app.workers.run_worker import (
     ModelFactory,
     continue_after_framing,
     default_model_factory,
+    preview_retry_resume_entry,
+    retry_failed_run,
     start_framing,
 )
 
@@ -142,10 +145,65 @@ async def cancel_run(run_id: uuid.UUID, session: SessionDep) -> None:
     run = await session.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if run.status in (RunStatus.completed, RunStatus.failed, RunStatus.cancelled):
+        return
     run.status = RunStatus.cancelling
     await session.commit()
-    TASK_REGISTRY.cancel(f"run:{run_id}")
-    await publish(run_id, "cancel_ack", {"status": "cancelling"}, agent="system")
+    task_cancelled = TASK_REGISTRY.cancel(f"run:{run_id}")
+    if task_cancelled:
+        await publish(run_id, "cancel_ack", {"status": "cancelling"}, agent="system")
+        return
+
+    run.status = RunStatus.cancelled
+    run.completed_at = datetime.now(UTC)
+    await session.commit()
+    await publish(
+        run_id,
+        "cancel_ack",
+        {"status": "cancelled", "reason": "no_active_task"},
+        agent="system",
+    )
+    await publish(run_id, "run_cancelled", {"reason": "no_active_task"}, agent="system")
+
+
+@router.post("/{run_id}/retry", status_code=status.HTTP_204_NO_CONTENT)
+async def retry_run(
+    run_id: uuid.UUID,
+    session: SessionDep,
+    factory_builder: ModelFactoryBuilderDep,
+) -> None:
+    run = await session.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if run.status not in (RunStatus.failed, RunStatus.cancelled):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="only failed or cancelled runs can be retried",
+        )
+    profile = _profile_for_task_type(run.task_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="task_type does not support same-run retry",
+        )
+
+    try:
+        resume_from = await preview_retry_resume_entry(run_id, profile=profile)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    model_factory = await factory_builder(run_id)
+    now = datetime.now(UTC)
+    run.status = RunStatus.running
+    run.started_at = now
+    run.heartbeat_at = now
+    run.completed_at = None
+    await session.commit()
+    await publish(run_id, "run_retry_started", {"resume_from": resume_from}, agent="system")
+    TASK_REGISTRY.spawn(
+        f"run:{run_id}",
+        retry_failed_run(run_id, profile=profile, model_factory=model_factory),
+    )
 
 
 @router.get("/{run_id}", response_model=RunInfoResponse)

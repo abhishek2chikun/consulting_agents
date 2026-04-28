@@ -35,9 +35,12 @@ V1 design notes:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
+import random
+import time
 from collections.abc import Callable
 from typing import Any, TypedDict
 
@@ -64,6 +67,7 @@ _BEDROCK_MODEL_MAP: dict[str, str] = {
 }
 
 _DEFAULT_AWS_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+_TRANSIENT_BEDROCK_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 class ProviderSpec(TypedDict):
@@ -228,6 +232,9 @@ class _BedrockBearerChatModel(BaseChatModel):
     max_tokens: int = 4096
     temperature: float = 0.2
     timeout_sec: int = 300
+    retry_max_attempts: int = 5
+    retry_initial_seconds: float = 1
+    retry_max_seconds: float = 30
 
     @property
     def _llm_type(self) -> str:
@@ -295,6 +302,32 @@ class _BedrockBearerChatModel(BaseChatModel):
         )
         return ChatResult(generations=[ChatGeneration(message=message)])
 
+    def _attempt_count(self) -> int:
+        return max(1, int(self.retry_max_attempts))
+
+    def _retry_delay(self, attempt: int) -> float:
+        base = min(
+            float(self.retry_max_seconds),
+            float(self.retry_initial_seconds) * (2 ** max(0, attempt - 1)),
+        )
+        return random.uniform(0, max(0.0, base))
+
+    def _bedrock_http_error(self, exc: httpx.HTTPStatusError, *, attempt: int) -> RuntimeError:
+        body = exc.response.text[:500]
+        attempts = self._attempt_count()
+        suffix = f" after {attempts} attempts" if attempt >= attempts else ""
+        return RuntimeError(
+            f"AWS Bedrock request failed{suffix} with HTTP {exc.response.status_code}: {body}"
+        )
+
+    def _bedrock_transport_error(self, exc: httpx.TransportError, *, attempt: int) -> RuntimeError:
+        attempts = self._attempt_count()
+        suffix = f" after {attempts} attempts" if attempt >= attempts else ""
+        return RuntimeError(
+            f"AWS Bedrock request failed{suffix} due to transport error: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
     def _generate(  # type: ignore[override]
         self,
         messages: list[BaseMessage],
@@ -302,20 +335,31 @@ class _BedrockBearerChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         payload = self._payload(messages, stop=stop, **kwargs)
-        try:
-            with httpx.Client(timeout=self.timeout_sec) as client:
-                response = client.post(self._endpoint(), headers=self._headers(), json=payload)
-            response.raise_for_status()
-        except httpx.TimeoutException as exc:
-            raise TimeoutError(
-                f"AWS Bedrock request timed out after {self.timeout_sec} seconds"
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            body = exc.response.text[:500]
-            raise RuntimeError(
-                f"AWS Bedrock request failed with HTTP {exc.response.status_code}: {body}"
-            ) from exc
-        return self._chat_result(response.json())
+        for attempt in range(1, self._attempt_count() + 1):
+            try:
+                with httpx.Client(timeout=self.timeout_sec) as client:
+                    response = client.post(self._endpoint(), headers=self._headers(), json=payload)
+                response.raise_for_status()
+                return self._chat_result(response.json())
+            except httpx.TimeoutException as exc:
+                if attempt >= self._attempt_count():
+                    raise TimeoutError(
+                        f"AWS Bedrock request timed out after {self.timeout_sec} seconds "
+                        f"and {self._attempt_count()} attempts"
+                    ) from exc
+                time.sleep(self._retry_delay(attempt))
+            except httpx.HTTPStatusError as exc:
+                if (
+                    exc.response.status_code not in _TRANSIENT_BEDROCK_STATUS_CODES
+                    or attempt >= self._attempt_count()
+                ):
+                    raise self._bedrock_http_error(exc, attempt=attempt) from exc
+                time.sleep(self._retry_delay(attempt))
+            except httpx.TransportError as exc:
+                if attempt >= self._attempt_count():
+                    raise self._bedrock_transport_error(exc, attempt=attempt) from exc
+                time.sleep(self._retry_delay(attempt))
+        raise RuntimeError("AWS Bedrock request failed without a response")
 
     async def _agenerate(  # type: ignore[override]
         self,
@@ -324,24 +368,35 @@ class _BedrockBearerChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         payload = self._payload(messages, stop=stop, **kwargs)
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
-                response = await client.post(
-                    self._endpoint(),
-                    headers=self._headers(),
-                    json=payload,
-                )
-            response.raise_for_status()
-        except httpx.TimeoutException as exc:
-            raise TimeoutError(
-                f"AWS Bedrock request timed out after {self.timeout_sec} seconds"
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            body = exc.response.text[:500]
-            raise RuntimeError(
-                f"AWS Bedrock request failed with HTTP {exc.response.status_code}: {body}"
-            ) from exc
-        return self._chat_result(response.json())
+        for attempt in range(1, self._attempt_count() + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
+                    response = await client.post(
+                        self._endpoint(),
+                        headers=self._headers(),
+                        json=payload,
+                    )
+                response.raise_for_status()
+                return self._chat_result(response.json())
+            except httpx.TimeoutException as exc:
+                if attempt >= self._attempt_count():
+                    raise TimeoutError(
+                        f"AWS Bedrock request timed out after {self.timeout_sec} seconds "
+                        f"and {self._attempt_count()} attempts"
+                    ) from exc
+                await asyncio.sleep(self._retry_delay(attempt))
+            except httpx.HTTPStatusError as exc:
+                if (
+                    exc.response.status_code not in _TRANSIENT_BEDROCK_STATUS_CODES
+                    or attempt >= self._attempt_count()
+                ):
+                    raise self._bedrock_http_error(exc, attempt=attempt) from exc
+                await asyncio.sleep(self._retry_delay(attempt))
+            except httpx.TransportError as exc:
+                if attempt >= self._attempt_count():
+                    raise self._bedrock_transport_error(exc, attempt=attempt) from exc
+                await asyncio.sleep(self._retry_delay(attempt))
+        raise RuntimeError("AWS Bedrock request failed without a response")
 
     def with_structured_output(  # type: ignore[override]
         self, schema: Any, **_: Any
@@ -374,6 +429,9 @@ def _aws_factory(model: str, key: str | None) -> BaseChatModel:
     settings = get_settings()
     timeout_sec = settings.llm_timeout_sec
     max_tokens = settings.llm_max_tokens
+    retry_max_attempts = settings.bedrock_retry_max_attempts
+    retry_initial_seconds = settings.bedrock_retry_initial_seconds
+    retry_max_seconds = settings.bedrock_retry_max_seconds
 
     # If standard IAM env vars are already present, let boto3 use them.
     if os.environ.get("AWS_ACCESS_KEY_ID"):
@@ -397,6 +455,9 @@ def _aws_factory(model: str, key: str | None) -> BaseChatModel:
             region_name=region,
             timeout_sec=timeout_sec,
             max_tokens=max_tokens,
+            retry_max_attempts=retry_max_attempts,
+            retry_initial_seconds=retry_initial_seconds,
+            retry_max_seconds=retry_max_seconds,
         )
 
     return ChatBedrockConverse(model=bedrock_model, region_name=region)

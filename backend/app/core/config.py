@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     claude_model: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     llm_timeout_sec: int = 300
     llm_max_tokens: int = 16000
+    bedrock_retry_max_attempts: int = 5
+    bedrock_retry_initial_seconds: float = 1
+    bedrock_retry_max_seconds: float = 30
     use_bedrock: bool = False
     embedding_dim: int = 1536
     # Filesystem destination for uploaded document binaries (M3.3).

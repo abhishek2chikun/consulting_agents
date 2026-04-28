@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy import select
@@ -87,6 +88,7 @@ def build_audit_node(
                 RunStatus.failed,
             ):
                 run.status = RunStatus.completed
+                run.completed_at = datetime.now(UTC)
             await session.commit()
 
         await publish(

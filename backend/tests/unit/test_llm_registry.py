@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from langchain_core.messages import HumanMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import llm as llm_module
@@ -62,6 +64,9 @@ def _patch_service(
             claude_model=PROVIDER_REGISTRY[DEFAULT_PROVIDER]["default_model"],
             llm_timeout_sec=300,
             llm_max_tokens=16000,
+            bedrock_retry_max_attempts=5,
+            bedrock_retry_initial_seconds=1,
+            bedrock_retry_max_seconds=30,
         ),
     )
     return service
@@ -305,6 +310,9 @@ async def test_get_chat_model_aws_bearer_uses_configured_timeout(
             claude_model=PROVIDER_REGISTRY[DEFAULT_PROVIDER]["default_model"],
             llm_timeout_sec=900,
             llm_max_tokens=24000,
+            bedrock_retry_max_attempts=7,
+            bedrock_retry_initial_seconds=2,
+            bedrock_retry_max_seconds=45,
         ),
     )
     monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
@@ -316,6 +324,136 @@ async def test_get_chat_model_aws_bearer_uses_configured_timeout(
     assert type(result).__name__ == "_BedrockBearerChatModel"
     assert result.timeout_sec == 900
     assert result.max_tokens == 24000
+    assert result.retry_max_attempts == 7
+
+
+def _bedrock_response(status_code: int, payload: dict[str, Any]) -> httpx.Response:
+    return httpx.Response(
+        status_code,
+        json=payload,
+        request=httpx.Request("POST", "https://bedrock-runtime.us-east-1.amazonaws.com/model/x/invoke"),
+    )
+
+
+def _bedrock_success(text: str = "ok") -> httpx.Response:
+    return _bedrock_response(
+        200,
+        {
+            "content": [{"type": "text", "text": text}],
+            "usage": {},
+            "stop_reason": "end_turn",
+        },
+    )
+
+
+class _FakeSyncClient:
+    calls = 0
+    responses: list[httpx.Response] = []
+
+    def __init__(self, *, timeout: int) -> None:
+        self.timeout = timeout
+
+    def __enter__(self) -> _FakeSyncClient:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+        type(self).calls += 1
+        return type(self).responses.pop(0)
+
+
+class _FakeAsyncClient:
+    calls = 0
+    responses: list[httpx.Response] = []
+
+    def __init__(self, *, timeout: int) -> None:
+        self.timeout = timeout
+
+    async def __aenter__(self) -> _FakeAsyncClient:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    async def post(self, *_args: object, **_kwargs: object) -> httpx.Response:
+        type(self).calls += 1
+        return type(self).responses.pop(0)
+
+
+def _bearer_model(*, attempts: int = 3) -> Any:
+    return llm_module._BedrockBearerChatModel(
+        model="us.anthropic.claude-haiku-3-5-20241022-v1:0",
+        api_key="bedrock:api-key",
+        retry_max_attempts=attempts,
+        retry_initial_seconds=0,
+        retry_max_seconds=0,
+    )
+
+
+def test_bedrock_bearer_retries_transient_503_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeSyncClient.calls = 0
+    _FakeSyncClient.responses = [
+        _bedrock_response(
+            503,
+            {"message": "Too many connections, please wait before trying again."},
+        ),
+        _bedrock_success("ok after retry"),
+    ]
+    monkeypatch.setattr(llm_module.httpx, "Client", _FakeSyncClient)
+
+    result = _bearer_model(attempts=2)._generate([HumanMessage(content="hello")])
+
+    assert result.generations[0].message.content == "ok after retry"
+    assert _FakeSyncClient.calls == 2
+
+
+def test_bedrock_bearer_exhausts_transient_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    _FakeSyncClient.calls = 0
+    _FakeSyncClient.responses = [
+        _bedrock_response(429, {"message": "rate limited"}),
+        _bedrock_response(503, {"message": "Too many connections"}),
+    ]
+    monkeypatch.setattr(llm_module.httpx, "Client", _FakeSyncClient)
+
+    with pytest.raises(RuntimeError, match="after 2 attempts with HTTP 503"):
+        _bearer_model(attempts=2)._generate([HumanMessage(content="hello")])
+    assert _FakeSyncClient.calls == 2
+
+
+def test_bedrock_bearer_does_not_retry_non_transient_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeSyncClient.calls = 0
+    _FakeSyncClient.responses = [
+        _bedrock_response(400, {"message": "bad request"}),
+        _bedrock_success("should not be used"),
+    ]
+    monkeypatch.setattr(llm_module.httpx, "Client", _FakeSyncClient)
+
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        _bearer_model(attempts=2)._generate([HumanMessage(content="hello")])
+    assert _FakeSyncClient.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_bedrock_bearer_async_retries_transient_503_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeAsyncClient.calls = 0
+    _FakeAsyncClient.responses = [
+        _bedrock_response(503, {"message": "Too many connections"}),
+        _bedrock_success("async ok"),
+    ]
+    monkeypatch.setattr(llm_module.httpx, "AsyncClient", _FakeAsyncClient)
+
+    result = await _bearer_model(attempts=2)._agenerate([HumanMessage(content="hello")])
+
+    assert result.generations[0].message.content == "async ok"
+    assert _FakeAsyncClient.calls == 2
 
 
 def test_provider_registry_has_all_llm_providers() -> None:

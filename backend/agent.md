@@ -16,7 +16,9 @@ FastAPI-based backend for the Consulting Research Agent V1. Async SQLAlchemy + P
 for persistence, Pydantic for validation, Fernet for at-rest secret encryption. Currently
 exposes `/health`, the M2.4 Settings REST API (`/settings/*`), the M2.6 `/ping`
 smoke-test endpoint, the M3.1 task catalog (`GET /tasks`), and the M3.3
-documents API (`POST/GET /documents`, `DELETE /documents/{id}`).
+documents API (`POST/GET /documents`, `DELETE /documents/{id}`), and the run
+lifecycle API (`POST /runs`, `POST /runs/{id}/answers`, `POST /runs/{id}/cancel`,
+`POST /runs/{id}/retry`, SSE, artifacts, evidence).
 
 ## Directory structure
 
@@ -203,6 +205,7 @@ Tests are split into:
 ## Progress
 
 - M1.1 — FastAPI scaffold + `/health` endpoint + Settings: **Done**.
+- Run retry/resume — AWS Bedrock bearer calls now retry transient HTTP `429/5xx` and transport failures with bounded exponential jitter. Failed consulting runs can be resumed in place via `POST /runs/{id}/retry`; the worker reconstructs state from saved questionnaire answers, artifacts, evidence, and gate verdicts, then starts at the first incomplete durable graph node (`stage3_risk` for runs whose stage 1 and 2 gates have advanced). Retry emits `run_retry_started` before scheduling the resumed `run:{id}` task: **Done**.
 - M1.3 — Local infra (Postgres 16 + pgvector) via Docker Compose at `infra/docker-compose.yml`; root `Makefile` exposes `db-up`/`db-down`/`db-logs`/`db-shell`/`dev`. Connect via `DATABASE_URL=postgresql+asyncpg://consulting:consulting@localhost:5432/consulting`: **Done**.
 - M1.4 — Async DB session (`app.core.db`: `engine`, `AsyncSessionLocal`, `get_session`, `Base`) + Alembic baseline (`alembic/`, revision `0001`). Root `Makefile` adds `migrate` and `migrate-rev m="..."`. Integration test `tests/integration/test_db.py::test_db_session_can_select_one` covers it: **Done**.
 - M1.5 — Quality gates: `scripts/check.sh` (backend lint/format/mypy/unit tests + frontend install/lint/typecheck/build), `.pre-commit-config.yaml` (ruff, ruff-format, local mypy via uv venv, eslint, tsc), `pre-commit` added to backend dev deps, root `Makefile` exposes `check`, `check-integration`, `precommit-install`: **Done**.

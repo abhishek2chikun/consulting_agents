@@ -30,10 +30,19 @@ def build_consulting_graph(
     checkpointer: Any | None = None,
     max_stage_retries: int = DEFAULT_MAX_STAGE_RETRIES,
     include_framing: bool = True,
+    entry_node: str | None = None,
 ) -> Any:
     """Compile the N-stage consulting pipeline for ``profile``."""
     if not profile.stages:
         raise ValueError(f"profile {profile.slug} must define at least one stage")
+    valid_entry_nodes = {
+        "framing",
+        "synthesis",
+        "audit",
+        *(stage.node_name for stage in profile.stages),
+    }
+    if entry_node is not None and entry_node not in valid_entry_nodes:
+        raise ValueError(f"unknown entry_node for profile {profile.slug!r}: {entry_node!r}")
 
     tools = tools_factory() if tools_factory is not None else []
     framing_model = model_factory("framing")
@@ -65,8 +74,10 @@ def build_consulting_graph(
     )
     graph.add_node("audit", cast(Any, build_audit_node(model=audit_model, profile=profile)))
 
-    first_stage = profile.stages[0].node_name
-    if include_framing:
+    first_stage = entry_node or profile.stages[0].node_name
+    if entry_node is not None:
+        graph.add_edge(START, entry_node)
+    elif include_framing:
         graph.add_edge(START, "framing")
         graph.add_edge("framing", first_stage)
     else:

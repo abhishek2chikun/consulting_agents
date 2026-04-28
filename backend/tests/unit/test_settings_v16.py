@@ -12,6 +12,9 @@ V16_ENV_VARS = (
     "STALE_RUN_THRESHOLD_SECONDS",
     "WORKER_CONCURRENCY",
     "REACT_MAX_ITERATIONS",
+    "BEDROCK_RETRY_MAX_ATTEMPTS",
+    "BEDROCK_RETRY_INITIAL_SECONDS",
+    "BEDROCK_RETRY_MAX_SECONDS",
 )
 
 
@@ -26,6 +29,9 @@ def test_v16_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.stale_run_threshold_seconds == 300
     assert settings.worker_concurrency == 4
     assert settings.react_max_iterations == 6
+    assert settings.bedrock_retry_max_attempts == 5
+    assert settings.bedrock_retry_initial_seconds == 1
+    assert settings.bedrock_retry_max_seconds == 30
 
 
 def test_v16_settings_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -35,6 +41,9 @@ def test_v16_settings_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STALE_RUN_THRESHOLD_SECONDS", "12")
     monkeypatch.setenv("WORKER_CONCURRENCY", "13")
     monkeypatch.setenv("REACT_MAX_ITERATIONS", "14")
+    monkeypatch.setenv("BEDROCK_RETRY_MAX_ATTEMPTS", "15")
+    monkeypatch.setenv("BEDROCK_RETRY_INITIAL_SECONDS", "0.25")
+    monkeypatch.setenv("BEDROCK_RETRY_MAX_SECONDS", "16")
 
     settings = Settings()
     assert settings.run_timeout_seconds == 10
@@ -42,3 +51,6 @@ def test_v16_settings_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.stale_run_threshold_seconds == 12
     assert settings.worker_concurrency == 13
     assert settings.react_max_iterations == 14
+    assert settings.bedrock_retry_max_attempts == 15
+    assert settings.bedrock_retry_initial_seconds == 0.25
+    assert settings.bedrock_retry_max_seconds == 16

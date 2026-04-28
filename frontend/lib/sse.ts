@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { TERMINAL_RUN_EVENT_TYPES } from "@/lib/runEvents";
+import { RUN_LIFECYCLE_EVENT_TYPES, TERMINAL_RUN_EVENT_TYPES } from "@/lib/runEvents";
 
 export interface RunEvent {
   id: number;
@@ -29,6 +29,7 @@ const RUN_EVENT_TYPES = [
   "run_failed",
   "system.run_failed",
   "run_cancelled",
+  "run_retry_started",
 ] as const;
 
 /** Hard ceiling on buffered events to prevent unbounded memory growth. */
@@ -40,14 +41,23 @@ const MAX_BACKOFF_SEC = 30;
 /** Give up after this many consecutive reconnect failures. */
 const MAX_RETRIES = 10;
 
-export function useEventStream(runId: string | null) {
+/**
+ * Wait briefly before honoring a terminal lifecycle event so replayed
+ * failures that are immediately superseded by `run_retry_started`
+ * do not cut off the stream after a page refresh.
+ */
+const TERMINAL_SETTLE_MS = 500;
+
+export function useEventStream(runId: string | null, reconnectKey = 0) {
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [status, setStatus] = useState<"idle" | "connecting" | "open" | "closed">("idle");
   const lastEventIdRef = useRef<number | null>(null);
   const reconnectTimer = useRef<number | null>(null);
+  const terminalTimer = useRef<number | null>(null);
   const retriesRef = useRef(0);
-  /** Set to true once a terminal event lands — prevents further reconnects. */
+  /** Set to true once the latest lifecycle event settles as terminal. */
   const terminalRef = useRef(false);
+  const latestLifecycleTerminalRef = useRef(false);
 
   useEffect(() => {
     if (runId === null) {
@@ -60,6 +70,30 @@ export function useEventStream(runId: string | null) {
     // Reset per-mount state.
     retriesRef.current = 0;
     terminalRef.current = false;
+    latestLifecycleTerminalRef.current = false;
+
+    const clearTerminalTimer = () => {
+      if (terminalTimer.current !== null) {
+        window.clearTimeout(terminalTimer.current);
+        terminalTimer.current = null;
+      }
+    };
+
+    const scheduleTerminalClose = () => {
+      clearTerminalTimer();
+      if (!latestLifecycleTerminalRef.current) {
+        return;
+      }
+      terminalTimer.current = window.setTimeout(() => {
+        terminalTimer.current = null;
+        if (closed || !latestLifecycleTerminalRef.current) {
+          return;
+        }
+        terminalRef.current = true;
+        es?.close();
+        setStatus("closed");
+      }, TERMINAL_SETTLE_MS);
+    };
 
     const connect = () => {
       if (closed || terminalRef.current) return;
@@ -103,12 +137,11 @@ export function useEventStream(runId: string | null) {
             return next;
           });
 
-          // If this is a terminal event, close the connection for good.
-          if (TERMINAL_RUN_EVENT_TYPES.has(parsed.type)) {
-            terminalRef.current = true;
-            es?.close();
-            setStatus("closed");
+          if (RUN_LIFECYCLE_EVENT_TYPES.has(parsed.type)) {
+            latestLifecycleTerminalRef.current = TERMINAL_RUN_EVENT_TYPES.has(parsed.type);
           }
+
+          scheduleTerminalClose();
         } catch {
           // ignore malformed message
         }
@@ -150,10 +183,11 @@ export function useEventStream(runId: string | null) {
       if (reconnectTimer.current !== null) {
         window.clearTimeout(reconnectTimer.current);
       }
+      clearTerminalTimer();
       es?.close();
       setStatus("closed");
     };
-  }, [runId]);
+  }, [runId, reconnectKey]);
 
   if (runId === null) {
     return { events: [], status: "idle" as const };
