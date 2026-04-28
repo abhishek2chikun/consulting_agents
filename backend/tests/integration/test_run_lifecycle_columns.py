@@ -15,6 +15,15 @@ from app.models import SINGLETON_USER_ID, Artifact, Run, RunStatus
 from app.workers.run_worker import continue_after_framing
 
 
+async def _wait_for(predicate: callable, *, timeout: float = 3.0) -> None:
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if await predicate():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("condition not met before timeout")
+
+
 def test_run_model_exposes_lifecycle_fields() -> None:
     columns = Run.__table__.c
 
@@ -138,26 +147,49 @@ async def test_continue_after_framing_populates_lifecycle_timestamps(
 
     try:
         started_at = None
-        deadline = asyncio.get_event_loop().time() + 2.0
-        while asyncio.get_event_loop().time() < deadline:
+
+        async def _started() -> bool:
+            nonlocal started_at
             async with AsyncSessionLocal() as session:
                 run = await session.get(Run, run_id)
                 assert run is not None
                 if run.started_at is not None:
                     started_at = run.started_at
-                    break
-            await asyncio.sleep(0.05)
+                    return True
+                return False
+
+        await _wait_for(_started, timeout=2.0)
 
         assert started_at is not None
 
-        await asyncio.sleep(1.2)
+        first_heartbeat = None
 
-        async with AsyncSessionLocal() as session:
-            run = await session.get(Run, run_id)
-            assert run is not None
-            first_heartbeat = run.heartbeat_at
+        async def _heartbeat_started() -> bool:
+            nonlocal first_heartbeat
+            async with AsyncSessionLocal() as session:
+                run = await session.get(Run, run_id)
+                assert run is not None
+                if run.heartbeat_at is not None and run.heartbeat_at > started_at:
+                    first_heartbeat = run.heartbeat_at
+                    return True
+                return False
 
-        await asyncio.sleep(1.2)
+        await _wait_for(_heartbeat_started, timeout=2.5)
+
+        second_heartbeat = None
+
+        async def _heartbeat_advanced() -> bool:
+            nonlocal second_heartbeat
+            async with AsyncSessionLocal() as session:
+                run = await session.get(Run, run_id)
+                assert run is not None
+                if first_heartbeat is not None and run.heartbeat_at is not None:
+                    if run.heartbeat_at > first_heartbeat:
+                        second_heartbeat = run.heartbeat_at
+                        return True
+                return False
+
+        await _wait_for(_heartbeat_advanced, timeout=2.5)
 
         async with AsyncSessionLocal() as session:
             run = await session.get(Run, run_id)
@@ -166,8 +198,8 @@ async def test_continue_after_framing_populates_lifecycle_timestamps(
             assert run.started_at is not None
             assert run.started_at == started_at
             assert first_heartbeat is not None
-            assert run.heartbeat_at is not None
-            assert run.heartbeat_at > first_heartbeat
+            assert second_heartbeat is not None
+            assert run.heartbeat_at == second_heartbeat
 
         task.cancel()
         await task

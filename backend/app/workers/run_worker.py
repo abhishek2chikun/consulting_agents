@@ -28,6 +28,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import update
+
 from app.agents._engine.graph import build_consulting_graph
 from app.agents._engine.profile import ConsultingProfile
 from app.agents.budget import BudgetTracker
@@ -169,17 +171,27 @@ async def continue_after_framing(
 
         # 1. Persist answers as a single user-role message (audit trail).
         async with AsyncSessionLocal() as session:
-            run = await session.get(Run, run_id)
-            if run is None:
-                return
-            if run.status == RunStatus.cancelling:
-                await session.rollback()
+            started_at = _utcnow()
+            transition = await session.execute(
+                update(Run)
+                .where(
+                    Run.id == run_id,
+                    Run.status.in_((RunStatus.created, RunStatus.questioning)),
+                )
+                .values(
+                    status=RunStatus.running,
+                    started_at=started_at,
+                    heartbeat_at=started_at,
+                )
+                .returning(Run.goal)
+            )
+            goal = transition.scalar_one_or_none()
+            if goal is None:
+                run = await session.get(Run, run_id)
+                if run is None:
+                    return
                 await _mark_cancelled(run_id)
                 return
-            run.status = RunStatus.running
-            if run.started_at is None:
-                run.started_at = _utcnow()
-            run.heartbeat_at = _utcnow()
             session.add(
                 Message(
                     run_id=run_id,
@@ -188,7 +200,6 @@ async def continue_after_framing(
                 )
             )
             await session.commit()
-            goal = run.goal
 
         heartbeat_task = asyncio.create_task(
             _heartbeat_loop(
