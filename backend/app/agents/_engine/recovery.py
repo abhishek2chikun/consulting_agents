@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -36,29 +35,26 @@ async def sweep_stale_runs(session: AsyncSession | None = None) -> int:
     reason = _staleness_reason(settings.stale_run_threshold_seconds)
 
     try:
-        stale_runs = (
+        completed_at = _utcnow()
+        liveness_timestamp = func.coalesce(Run.heartbeat_at, Run.started_at, Run.created_at)
+        run_ids = list(
             (
                 await active_session.execute(
-                    select(Run).where(
+                    update(Run)
+                    .where(
                         Run.status == RunStatus.running,
-                        Run.heartbeat_at.is_not(None),
-                        Run.heartbeat_at < cutoff,
+                        liveness_timestamp < cutoff,
                     )
+                    .values(status=RunStatus.failed, completed_at=completed_at)
+                    .returning(Run.id)
                 )
             )
             .scalars()
             .all()
         )
 
-        if not stale_runs:
+        if not run_ids:
             return 0
-
-        completed_at = _utcnow()
-        run_ids: list[uuid.UUID] = []
-        for run in stale_runs:
-            run.status = RunStatus.failed
-            run.completed_at = completed_at
-            run_ids.append(run.id)
 
         await active_session.commit()
 

@@ -258,7 +258,9 @@ export function useAgentStates(events: RunEvent[]): AgentStatesResult {
     }
 
     for (const evt of events) {
-      if (evt.type === "run_failed") runFailed = true;
+      if (evt.type === "run_failed" || evt.type === "system.run_failed") {
+        runFailed = true;
+      }
       if (evt.type === "run_completed") runCompleted = true;
     }
 
