@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from sqlalchemy import select
 
 from app.agents._engine.profile import ConsultingProfile, ProfileStage, WorkerSpec
@@ -89,6 +89,16 @@ class GateFakeChatModel(FakeChatModel):
         object.__setattr__(self, "active", self.active - 1)
 
 
+class RecordingTool:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls: list[Any] = []
+
+    async def ainvoke(self, args: Any) -> str:
+        self.calls.append(args)
+        return f"{self.name} result"
+
+
 @pytest_asyncio.fixture
 async def run_id() -> AsyncIterator[uuid.UUID]:
     async with AsyncSessionLocal() as session:
@@ -150,6 +160,10 @@ def _state(run_id: uuid.UUID) -> RunState:
             "questionnaire_answers": {},
         },
     }
+
+
+def _worker_agent_ids(fake: RecordingFakeChatModel) -> list[str]:
+    return [_agent_id_from_messages(messages) for _, messages in fake.structured_calls]
 
 
 def _agent_id_from_messages(messages: Sequence[BaseMessage]) -> str:
@@ -277,6 +291,153 @@ async def test_worker_fanout_respects_worker_concurrency_cap(
         "stage1_foundation.regulatory",
     ]
     assert fake.finished == fake.started
+
+
+@pytest.mark.asyncio
+async def test_worker_reiterate_with_worker_slug_runs_only_target_worker(
+    run_id: uuid.UUID,
+) -> None:
+    fake = RecordingFakeChatModel(
+        structured_responses={
+            "stage1_foundation.customer": {
+                "artifacts": [{"path": "findings.md", "content": "New customer [^c2]."}],
+                "evidence": [{"src_id": "c2", "title": "Customer source 2"}],
+                "summary": "Customer retry complete",
+            }
+        }
+    )
+    node = make_stage_node("stage1_foundation", model=fake, profile=_profile(workers=_workers()))
+    state = _state(run_id)
+    state["target_agents"] = ["customer"]
+    state["artifacts"] = {
+        "stage1_foundation/market_sizing/findings.md": "Accepted market [^m1].",
+        "stage1_foundation/regulatory/findings.md": "Accepted regulatory [^r1].",
+    }
+    state["worker_outputs"] = {
+        "stage1_foundation": {
+            "market_sizing": {
+                "summary": "Accepted market",
+                "artifact_paths": ["stage1_foundation/market_sizing/findings.md"],
+                "evidence_ids": ["m1"],
+            },
+            "regulatory": {
+                "summary": "Accepted regulatory",
+                "artifact_paths": ["stage1_foundation/regulatory/findings.md"],
+                "evidence_ids": ["r1"],
+            },
+        }
+    }
+
+    out = await node(state)
+
+    assert _worker_agent_ids(fake) == ["stage1_foundation.customer"]
+    assert (
+        out["artifacts"]["stage1_foundation/market_sizing/findings.md"] == "Accepted market [^m1]."
+    )
+    assert (
+        out["artifacts"]["stage1_foundation/regulatory/findings.md"] == "Accepted regulatory [^r1]."
+    )
+    assert out["artifacts"]["stage1_foundation/customer/findings.md"] == "New customer [^c2]."
+    assert out["worker_outputs"]["stage1_foundation"]["market_sizing"]["summary"] == (
+        "Accepted market"
+    )
+    assert out["worker_outputs"]["stage1_foundation"]["regulatory"]["summary"] == (
+        "Accepted regulatory"
+    )
+    assert out["worker_outputs"]["stage1_foundation"]["customer"] == {
+        "summary": "Customer retry complete",
+        "artifact_paths": ["stage1_foundation/customer/findings.md"],
+        "evidence_ids": ["c2"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_worker_reiterate_accepts_dotted_worker_id(run_id: uuid.UUID) -> None:
+    fake = RecordingFakeChatModel(
+        structured_responses={
+            "stage1_foundation.regulatory": {
+                "artifacts": [{"path": "findings.md", "content": "Reg retry [^r2]."}],
+                "evidence": [{"src_id": "r2", "title": "Reg source 2"}],
+                "summary": "Reg retry complete",
+            }
+        }
+    )
+    node = make_stage_node("stage1_foundation", model=fake, profile=_profile(workers=_workers()))
+    state = _state(run_id)
+    state["target_agents"] = ["stage1_foundation.regulatory"]
+
+    out = await node(state)
+
+    assert _worker_agent_ids(fake) == ["stage1_foundation.regulatory"]
+    assert out["artifacts"] == {"stage1_foundation/regulatory/findings.md": "Reg retry [^r2]."}
+
+
+@pytest.mark.asyncio
+async def test_worker_fanout_removes_write_artifact_tool(run_id: uuid.UUID) -> None:
+    write_artifact = RecordingTool("write_artifact")
+    lookup = RecordingTool("lookup_market")
+    fake = FakeChatModel(
+        responses=[
+            AIMessage(
+                content="Try direct artifact write",
+                tool_calls=[
+                    {
+                        "name": "write_artifact",
+                        "args": {
+                            "path": "findings.md",
+                            "kind": "markdown",
+                            "content": "tool content",
+                        },
+                        "id": "call_write",
+                    }
+                ],
+            ),
+            AIMessage(content="Ready to finalize"),
+        ],
+        structured_responses=[
+            {
+                "artifacts": [{"path": "findings.md", "content": "Structured [^c3]."}],
+                "evidence": [{"src_id": "c3", "title": "Customer source 3"}],
+                "summary": "Customer complete",
+            }
+        ],
+    )
+    node = make_stage_node(
+        "stage1_foundation",
+        model=fake,
+        tools=[write_artifact, lookup],
+        profile=_profile(workers=_workers()),
+    )
+    state = _state(run_id)
+    state["target_agents"] = ["customer"]
+
+    out = await node(state)
+
+    assert write_artifact.calls == []
+    assert fake.bound_tools == [lookup]
+    assert out["artifacts"] == {"stage1_foundation/customer/findings.md": "Structured [^c3]."}
+    _, structured_messages = fake.structured_calls[0]
+    assert any(
+        isinstance(message, ToolMessage)
+        and message.tool_call_id == "call_write"
+        and "Tool not found: write_artifact" in str(message.content)
+        for message in structured_messages
+    )
+    async with AsyncSessionLocal() as session:
+        artifact_rows = (
+            (await session.execute(select(Artifact).where(Artifact.run_id == run_id)))
+            .scalars()
+            .all()
+        )
+        event_rows = (
+            (await session.execute(select(Event).where(Event.run_id == run_id))).scalars().all()
+        )
+    assert [(row.path, row.content) for row in artifact_rows] == [
+        ("stage1_foundation/customer/findings.md", "Structured [^c3].")
+    ]
+    assert {event.agent for event in event_rows if event.type == "artifact_update"} == {
+        "stage1_foundation.customer"
+    }
 
 
 @pytest.mark.asyncio
