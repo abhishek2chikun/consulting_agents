@@ -6,9 +6,9 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from app.agents._engine.recovery import sweep_stale_runs
+from app.agents._engine.recovery import _staleness_reason, sweep_stale_runs
 from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
 from app.main import create_app
@@ -20,6 +20,7 @@ async def _create_run(
     status: RunStatus,
     heartbeat_at: datetime | None = None,
     started_at: datetime | None = None,
+    created_at: datetime | None = None,
 ) -> Run:
     async with AsyncSessionLocal() as session:
         run = Run(
@@ -32,6 +33,9 @@ async def _create_run(
         )
         session.add(run)
         await session.commit()
+        if created_at is not None:
+            await session.execute(update(Run).where(Run.id == run.id).values(created_at=created_at))
+            await session.commit()
         await session.refresh(run)
         return run
 
@@ -65,7 +69,80 @@ async def test_sweep_stale_runs_fails_stale_running_rows() -> None:
     assert len(events) == 1
     assert events[0].type == "system.run_failed"
     assert events[0].agent == "system"
-    assert events[0].payload == {"reason": "staleness: no heartbeat for >5 minutes"}
+    assert events[0].payload == {"reason": _staleness_reason(settings.stale_run_threshold_seconds)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("started_at", "created_at"),
+    [
+        pytest.param("stale", None, id="falls-back-to-started-at"),
+        pytest.param(None, "stale", id="falls-back-to-created-at"),
+    ],
+)
+async def test_sweep_stale_runs_falls_back_when_heartbeat_is_null(
+    started_at: str | None,
+    created_at: str | None,
+) -> None:
+    settings = get_settings()
+    stale_timestamp = datetime.now(UTC) - timedelta(
+        seconds=settings.stale_run_threshold_seconds + 1
+    )
+    run = await _create_run(
+        status=RunStatus.running,
+        started_at=stale_timestamp if started_at == "stale" else None,
+        heartbeat_at=None,
+        created_at=stale_timestamp if created_at == "stale" else None,
+    )
+
+    if created_at == "stale":
+        async with AsyncSessionLocal() as session:
+            persisted = await session.get(Run, run.id)
+            assert persisted is not None
+            assert persisted.created_at == stale_timestamp
+
+    recovered = await sweep_stale_runs()
+
+    async with AsyncSessionLocal() as session:
+        persisted = await session.get(Run, run.id)
+        events = (
+            (await session.execute(select(Event).where(Event.run_id == run.id).order_by(Event.id)))
+            .scalars()
+            .all()
+        )
+
+    assert recovered == 1
+    assert persisted is not None
+    assert persisted.status == RunStatus.failed
+    assert len(events) == 1
+    assert events[0].type == "system.run_failed"
+
+
+@pytest.mark.asyncio
+async def test_sweep_stale_runs_is_idempotent_after_first_recovery() -> None:
+    settings = get_settings()
+    stale_heartbeat = datetime.now(UTC) - timedelta(
+        seconds=settings.stale_run_threshold_seconds + 1
+    )
+    run = await _create_run(
+        status=RunStatus.running,
+        started_at=stale_heartbeat - timedelta(minutes=1),
+        heartbeat_at=stale_heartbeat,
+    )
+
+    first_recovered = await sweep_stale_runs()
+    second_recovered = await sweep_stale_runs()
+
+    async with AsyncSessionLocal() as session:
+        events = (
+            (await session.execute(select(Event).where(Event.run_id == run.id).order_by(Event.id)))
+            .scalars()
+            .all()
+        )
+
+    assert first_recovered == 1
+    assert second_recovered == 0
+    assert len(events) == 1
 
 
 @pytest.mark.asyncio
