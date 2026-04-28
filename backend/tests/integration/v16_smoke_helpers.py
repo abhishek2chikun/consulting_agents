@@ -169,7 +169,10 @@ def build_research_model(spec: ProfileSmokeSpec) -> ScriptedResearchModel:
         agent_id: [
             {
                 "name": "web_search",
-                "args": {"query": f"{agent_id} market evidence"},
+                "args": {
+                    "query": f"{agent_id} market evidence",
+                    "agent_id": agent_id,
+                },
                 "id": f"call_{agent_id.replace('.', '_')}",
             }
         ]
@@ -227,6 +230,16 @@ async def cleanup_run(run_id: uuid.UUID) -> None:
         await session.commit()
 
 
+async def artifact_content(run_id: uuid.UUID, path: str) -> str:
+    async with AsyncSessionLocal() as session:
+        row = (
+            await session.execute(
+                select(Artifact.content).where(Artifact.run_id == run_id, Artifact.path == path)
+            )
+        ).scalar_one()
+    return str(row)
+
+
 def system_prompt_text(model: FakeChatModel, *, structured: bool) -> str:
     calls = model.structured_calls if structured else model.calls
     messages = calls[0][1] if structured else calls[0]
@@ -256,7 +269,9 @@ __all__ = [
     "RecordingTool",
     "ScriptedResearchModel",
     "agent_id_from_messages",
+    "artifact_content",
     "build_models",
+    "build_final_report",
     "cleanup_run",
     "create_run",
     "run_summary",

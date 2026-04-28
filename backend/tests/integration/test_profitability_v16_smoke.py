@@ -12,6 +12,8 @@ from tests.integration.v16_smoke_helpers import (
     RecordingTool,
     ScriptedResearchModel,
     agent_id_from_messages,
+    artifact_content,
+    build_final_report,
     build_models,
     cleanup_run,
     create_run,
@@ -111,6 +113,9 @@ async def test_profitability_v16_profile_runs_with_workers_and_stage_tools(
 
         artifact_paths, gates, events = await run_summary(run_id)
         assert "final_report.md" in artifact_paths
+        report_content = await artifact_content(run_id, "final_report.md")
+        assert report_content.startswith(build_final_report(spec).rstrip())
+        assert "## Sources" in report_content
         assert len(gates) == 5
         assert {gate.stage for gate in gates} == set(spec.stage_slugs)
         assert all(gate.verdict == "advance" for gate in gates)
@@ -151,7 +156,8 @@ async def test_profitability_v16_profile_runs_with_workers_and_stage_tools(
         for skill_title in spec.audit_skill_titles:
             assert skill_title in system_prompt_text(models["audit"], structured=False)
 
-        assert tools[0].calls
+        assert {call["agent_id"] for call in tools[0].calls} == set(spec.tool_agents)
+        assert tools[1].calls == []
         warning_agents = {
             event.agent
             for event in events
