@@ -159,6 +159,11 @@ async def continue_after_framing(
     factory = model_factory or await default_model_factory(run_id)
     settings = get_settings()
     heartbeat_task: asyncio.Task[None] | None = None
+    timeout_triggered = asyncio.Event()
+    timeout_reason = f"timeout: exceeded {settings.run_timeout_seconds} s budget"
+    run_task = asyncio.current_task()
+    if run_task is None:  # pragma: no cover - asyncio always provides one here.
+        raise RuntimeError("continue_after_framing requires an active asyncio task")
 
     # 1. Persist answers as a single user-role message (audit trail).
     async with AsyncSessionLocal() as session:
@@ -183,6 +188,9 @@ async def continue_after_framing(
         _heartbeat_loop(
             run_id,
             interval_seconds=settings.heartbeat_interval_seconds,
+            timeout_seconds=settings.run_timeout_seconds,
+            run_task=run_task,
+            timeout_triggered=timeout_triggered,
         )
     )
 
@@ -211,25 +219,18 @@ async def continue_after_framing(
 
     cancelled = False
     try:
-        async with asyncio.timeout(settings.run_timeout_seconds):
-            async for _chunk in graph.astream(initial):
-                # Each chunk is a {node_name: state_update} dict yielded after
-                # a node completes. Check for cooperative cancel before
-                # entering the next node.
-                if await _run_is_cancelling(run_id):
-                    cancelled = True
-                    break
+        async for _chunk in graph.astream(initial):
+            # Each chunk is a {node_name: state_update} dict yielded after
+            # a node completes. Check for cooperative cancel before
+            # entering the next node.
+            if await _run_is_cancelling(run_id):
+                cancelled = True
+                break
     except asyncio.CancelledError:
-        await _mark_cancelled(run_id)
-        return
-    except TimeoutError:
-        if await _run_is_cancelling(run_id):
+        if timeout_triggered.is_set() and not await _run_is_cancelling(run_id):
+            await _mark_failed(run_id, reason=timeout_reason)
+        else:
             await _mark_cancelled(run_id)
-            return
-        await _mark_failed(
-            run_id,
-            reason=f"timeout: exceeded {settings.run_timeout_seconds} s budget",
-        )
         return
     except Exception as exc:
         logger.exception("graph execution failed for run %s", run_id)
@@ -278,14 +279,29 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-async def _heartbeat_loop(run_id: uuid.UUID, *, interval_seconds: int) -> None:
+async def _heartbeat_loop(
+    run_id: uuid.UUID,
+    *,
+    interval_seconds: int,
+    timeout_seconds: int,
+    run_task: asyncio.Task[None],
+    timeout_triggered: asyncio.Event,
+) -> None:
     while True:
         await asyncio.sleep(interval_seconds)
         async with AsyncSessionLocal() as session:
             run = await session.get(Run, run_id)
             if run is None or run.status in TERMINAL_RUN_STATUSES:
                 return
-            run.heartbeat_at = _utcnow()
+            now = _utcnow()
+            if run.started_at is not None:
+                elapsed_seconds = (now - run.started_at).total_seconds()
+                if elapsed_seconds > timeout_seconds:
+                    if run.status != RunStatus.cancelling:
+                        timeout_triggered.set()
+                    run_task.cancel()
+                    return
+            run.heartbeat_at = now
             await session.commit()
 
 
