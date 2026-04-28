@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.market_entry.profile import MARKET_ENTRY_PROFILE
 from app.core.config import get_settings
@@ -45,6 +47,21 @@ async def _wait_for(predicate: callable, *, timeout: float = 3.0) -> None:
             return
         await asyncio.sleep(0.05)
     raise AssertionError("condition not met before timeout")
+
+
+class _FactoryBarrier:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(self, _run_id: object) -> Callable[[str], object]:
+        self.entered.set()
+        await self.release.wait()
+
+        def factory(_role: str) -> object:
+            raise AssertionError("factory should not be used in startup race tests")
+
+        return factory
 
 
 @pytest.mark.asyncio
@@ -234,14 +251,8 @@ async def test_continue_after_framing_marks_cancelled_when_task_is_cancelled_dur
 ) -> None:
     get_settings.cache_clear()
     run = await _create_run()
-    entered_factory = asyncio.Event()
-
-    async def blocking_default_model_factory(_run_id: object) -> object:
-        entered_factory.set()
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
-
-    monkeypatch.setattr(run_worker, "default_model_factory", blocking_default_model_factory)
+    barrier = _FactoryBarrier()
+    monkeypatch.setattr(run_worker, "default_model_factory", barrier)
 
     task = asyncio.create_task(
         continue_after_framing(
@@ -253,7 +264,7 @@ async def test_continue_after_framing_marks_cancelled_when_task_is_cancelled_dur
     )
 
     try:
-        await asyncio.wait_for(entered_factory.wait(), timeout=2.0)
+        await asyncio.wait_for(barrier.entered.wait(), timeout=2.0)
         task.cancel()
         await task
 
@@ -270,6 +281,86 @@ async def test_continue_after_framing_marks_cancelled_when_task_is_cancelled_dur
 
         assert persisted.completed_at is not None
     finally:
+        barrier.release.set()
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_continue_after_framing_preserves_concurrent_cancel_during_startup_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    run = await _create_run()
+    transition_ready = asyncio.Event()
+    allow_transition = asyncio.Event()
+    original_execute = AsyncSession.execute
+
+    class NoopModel:
+        def with_structured_output(self, _schema: object) -> NoopModel:
+            return self
+
+        async def ainvoke(self, _messages: object) -> object:
+            raise AssertionError("graph should not start after concurrent cancellation")
+
+    def factory(_role: str) -> object:
+        return NoopModel()
+
+    async def gated_execute(
+        self: object,
+        statement: object,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        table = getattr(statement, "table", None)
+        if getattr(table, "name", None) == Run.__tablename__ and not transition_ready.is_set():
+            transition_ready.set()
+            await allow_transition.wait()
+        return await original_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", gated_execute)
+
+    task = asyncio.create_task(
+        continue_after_framing(
+            run.id,
+            answers={"time_horizon": "12 months"},
+            profile=MARKET_ENTRY_PROFILE,
+            model_factory=factory,
+        )
+    )
+
+    try:
+        await asyncio.wait_for(transition_ready.wait(), timeout=2.0)
+
+        async with AsyncSessionLocal() as session:
+            persisted = await session.get(Run, run.id)
+            assert persisted is not None
+            persisted.status = RunStatus.cancelling
+            await session.commit()
+
+        allow_transition.set()
+        await task
+
+        async with AsyncSessionLocal() as session:
+            persisted = await session.get(Run, run.id)
+            assert persisted is not None
+            messages = (
+                (await session.execute(select(Message).where(Message.run_id == run.id)))
+                .scalars()
+                .all()
+            )
+
+        assert persisted.status == RunStatus.cancelled
+        assert persisted.started_at is None
+        assert persisted.completed_at is not None
+        assert messages == []
+    finally:
+        allow_transition.set()
         if not task.done():
             task.cancel()
             try:
