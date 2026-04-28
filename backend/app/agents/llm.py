@@ -56,6 +56,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.services.settings_service import SettingsService
 
+PRODUCTION_MODEL_MARKER = "__production_model__"
+
 _BEDROCK_MODEL_MAP: dict[str, str] = {
     "claude-haiku-4-5-20251001": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "claude-sonnet-4-20250514": "us.anthropic.claude-sonnet-4-20250514-v1:0",
@@ -482,7 +484,9 @@ async def get_chat_model(role: str, *, session: AsyncSession) -> BaseChatModel:
     if spec["requires_key"] and not key:
         raise ValueError(f"No API key configured for provider {provider!r}")
 
-    return spec["factory"](model, key)
+    resolved = spec["factory"](model, key)
+    setattr(resolved, PRODUCTION_MODEL_MARKER, True)
+    return resolved
 
 
 # Maps the LangChain chat-model class name back to the registry provider key.
@@ -513,6 +517,7 @@ def provider_name_for(model: BaseChatModel) -> str:
 __all__ = [
     "DEFAULT_PROVIDER",
     "LLM_PROVIDERS",
+    "PRODUCTION_MODEL_MARKER",
     "PROVIDER_REGISTRY",
     "ProviderSpec",
     "get_chat_model",

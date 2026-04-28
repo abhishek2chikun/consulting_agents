@@ -22,6 +22,10 @@ from app.agents.llm import (
 )
 
 
+class _StubChatModel:
+    pass
+
+
 def _patch_service(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -70,13 +74,15 @@ async def test_get_chat_model_uses_override(monkeypatch: pytest.MonkeyPatch) -> 
         overrides={"framing": {"provider": "anthropic", "model": "claude-3-5-haiku-latest"}},
         keys={"anthropic": "sk-test"},
     )
-    constructor = MagicMock(return_value="chat-model-instance")
+    model = _StubChatModel()
+    constructor = MagicMock(return_value=model)
     monkeypatch.setattr(llm_module, "ChatAnthropic", constructor)
 
     session = MagicMock(spec=AsyncSession)
     result = await get_chat_model("framing", session=session)
 
-    assert result == "chat-model-instance"
+    assert result is model
+    assert getattr(result, llm_module.PRODUCTION_MODEL_MARKER) is True
     constructor.assert_called_once_with(model="claude-3-5-haiku-latest", api_key="sk-test")
 
 
@@ -97,13 +103,15 @@ async def test_get_chat_model_uses_default_when_no_override(
     monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", PROVIDER_REGISTRY[DEFAULT_PROVIDER]["default_model"])
-    constructor = MagicMock(return_value="bedrock-default-model")
+    model = _StubChatModel()
+    constructor = MagicMock(return_value=model)
     monkeypatch.setattr(llm_module, "ChatBedrockConverse", constructor)
 
     session = MagicMock(spec=AsyncSession)
     result = await get_chat_model("framing", session=session)
 
-    assert result == "bedrock-default-model"
+    assert result is model
+    assert getattr(result, llm_module.PRODUCTION_MODEL_MARKER) is True
     # The factory passes model= and region_name= (at minimum).
     call_kwargs = constructor.call_args.kwargs
     assert call_kwargs.get("model") == PROVIDER_REGISTRY[DEFAULT_PROVIDER]["default_model"]
@@ -153,13 +161,15 @@ async def test_get_chat_model_ollama_no_key_required(
         overrides={"framing": {"provider": "ollama", "model": "llama3.2"}},
         keys={"ollama": None},
     )
-    constructor = MagicMock(return_value="ollama-instance")
+    model = _StubChatModel()
+    constructor = MagicMock(return_value=model)
     monkeypatch.setattr(llm_module, "ChatOllama", constructor)
 
     session = MagicMock(spec=AsyncSession)
     result = await get_chat_model("framing", session=session)
 
-    assert result == "ollama-instance"
+    assert result is model
+    assert getattr(result, llm_module.PRODUCTION_MODEL_MARKER) is True
     constructor.assert_called_once()
     # Model must be forwarded; key argument is provider-specific (ollama ignores it).
     call_kwargs = constructor.call_args.kwargs
@@ -183,13 +193,15 @@ async def test_get_chat_model_aws_constructs_bedrock_converse(
     )
     monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
     monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
-    constructor = MagicMock(return_value="bedrock-instance")
+    model = _StubChatModel()
+    constructor = MagicMock(return_value=model)
     monkeypatch.setattr(llm_module, "ChatBedrockConverse", constructor)
 
     session = MagicMock(spec=AsyncSession)
     result = await get_chat_model("framing", session=session)
 
-    assert result == "bedrock-instance"
+    assert result is model
+    assert getattr(result, llm_module.PRODUCTION_MODEL_MARKER) is True
     # Factory must forward the model id.
     call_kwargs = constructor.call_args.kwargs
     assert call_kwargs.get("model") == "us.anthropic.claude-haiku-3-5-20241022-v1:0"

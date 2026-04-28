@@ -33,7 +33,7 @@ from sqlalchemy import update
 from app.agents._engine.graph import build_consulting_graph
 from app.agents._engine.profile import ConsultingProfile
 from app.agents.budget import BudgetTracker
-from app.agents.llm import get_chat_model, provider_name_for
+from app.agents.llm import PRODUCTION_MODEL_MARKER, get_chat_model, provider_name_for
 from app.agents.market_entry.nodes.framing import build_framing_node
 from app.core.config import get_settings
 from app.core.db import AsyncSessionLocal
@@ -72,14 +72,11 @@ TERMINAL_RUN_STATUSES = {
 
 
 def _assert_production_model(model: object, *, role: str) -> None:
-    """Reject test doubles from the production default factory path."""
-    model_type = type(model).__name__
-    model_module = type(model).__module__
-    llm_type = getattr(model, "_llm_type", None)
-    if model_module.startswith("app.testing") or llm_type == "fake-chat-model":
+    """Reject any model not stamped by the production registry path."""
+    if getattr(model, PRODUCTION_MODEL_MARKER, False) is not True:
         raise RuntimeError(
-            "default_model_factory resolved a scripted/fake model in the production path "
-            f"for role {role!r}: {model_module}.{model_type}"
+            "default_model_factory resolved an unapproved model in the production path "
+            f"for role {role!r}: {type(model).__module__}.{type(model).__name__}"
         )
 
 
