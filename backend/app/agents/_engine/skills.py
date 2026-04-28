@@ -21,12 +21,21 @@ def load_skill(slug: str) -> str:
     except FileNotFoundError as exc:
         raise FileNotFoundError(f"Skill slug not found: {slug}") from exc
 
-    if content.startswith("---\n"):
-        parts = content.split("---\n", 2)
+    return _strip_frontmatter(content)
+
+
+def _strip_frontmatter(content: str) -> str:
+    """Remove YAML frontmatter from a skill body when present."""
+    for delimiter in ("---\n", "---\r\n"):
+        if not content.startswith(delimiter):
+            continue
+
+        parts = content.split(delimiter, 2)
         if len(parts) == 3:
             content = parts[2]
+        break
 
-    return content.lstrip("\n")
+    return content.lstrip("\r\n")
 
 
 def render_skills_block(slugs: tuple[str, ...]) -> str:

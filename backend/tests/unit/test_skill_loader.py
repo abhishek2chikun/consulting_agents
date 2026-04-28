@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from app.agents._engine.skills import inject_skills, load_skill, render_skills_block
+from app.agents._engine.skills import (
+    _strip_frontmatter,
+    inject_skills,
+    load_skill,
+    render_skills_block,
+)
 
 
 def test_load_skill_strips_yaml_frontmatter() -> None:
@@ -14,6 +19,16 @@ def test_load_skill_strips_yaml_frontmatter() -> None:
     assert not body.startswith("---")
     assert "name:" not in before_first_heading
     assert body.startswith("# Market Sizing")
+
+
+def test_strip_frontmatter_supports_crlf_delimiters() -> None:
+    content = "---\r\nname: crlf-skill\r\ndescription: test\r\n---\r\n\r\n# CRLF Skill\r\nBody"
+
+    body = _strip_frontmatter(content)
+
+    assert not body.startswith("---")
+    assert "name:" not in body.split("#", maxsplit=1)[0]
+    assert body.startswith("# CRLF Skill")
 
 
 def test_load_skill_uses_lru_cache_hits() -> None:
