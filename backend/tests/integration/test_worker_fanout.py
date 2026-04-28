@@ -273,6 +273,45 @@ async def test_workers_fan_out_and_merge_output_state_and_persistence(run_id: uu
 
 
 @pytest.mark.asyncio
+async def test_worker_artifact_path_rejects_traversal(run_id: uuid.UUID) -> None:
+    fake = RecordingFakeChatModel(
+        structured_responses={
+            "stage1_foundation.customer": {
+                "artifacts": [{"path": "../shared.md", "content": "Bad [^b1]."}],
+                "evidence": [{"src_id": "b1", "title": "Bad source"}],
+                "summary": "bad",
+            }
+        }
+    )
+    node = make_stage_node("stage1_foundation", model=fake, profile=_profile(workers=_workers()))
+    state = _state(run_id)
+    state["target_agents"] = ["customer"]
+
+    with pytest.raises(ValueError, match=r"invalid worker artifact path.*\.\./shared\.md"):
+        await node(state)
+
+
+@pytest.mark.asyncio
+async def test_worker_artifact_path_allows_normal_nested_paths(run_id: uuid.UUID) -> None:
+    fake = RecordingFakeChatModel(
+        structured_responses={
+            "stage1_foundation.customer": {
+                "artifacts": [{"path": "analysis/findings.md", "content": "Nested [^n1]."}],
+                "evidence": [{"src_id": "n1", "title": "Nested source"}],
+                "summary": "nested",
+            }
+        }
+    )
+    node = make_stage_node("stage1_foundation", model=fake, profile=_profile(workers=_workers()))
+    state = _state(run_id)
+    state["target_agents"] = ["customer"]
+
+    out = await node(state)
+
+    assert out["artifacts"] == {"stage1_foundation/customer/analysis/findings.md": "Nested [^n1]."}
+
+
+@pytest.mark.asyncio
 async def test_worker_fanout_respects_worker_concurrency_cap(
     monkeypatch: pytest.MonkeyPatch,
     run_id: uuid.UUID,
