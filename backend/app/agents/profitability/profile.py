@@ -41,8 +41,15 @@ PROFITABILITY_PROFILE = ConsultingProfile(
             prompt_file="stage5_levers.md",
         ),
     ),
-    reviewer_prompt_package="app.agents.market_entry.prompts",
+    reviewer_prompt_package="app.agents.profitability.prompts",
     reviewer_prompt="reviewer.md",
+    reviewer_prompt_for_stage={
+        "stage1_revenue": "reviewer_stage1_revenue.md",
+        "stage2_cost": "reviewer_stage2_cost.md",
+        "stage3_margin": "reviewer_stage3_margin.md",
+        "stage4_competitor": "reviewer_stage4_competitor.md",
+        "stage5_levers": "reviewer_stage5_levers.md",
+    },
     synthesis_prompt="synthesis.md",
     audit_prompt="audit.md",
 )

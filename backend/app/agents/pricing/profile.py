@@ -41,8 +41,15 @@ PRICING_PROFILE = ConsultingProfile(
             prompt_file="stage5_rollout.md",
         ),
     ),
-    reviewer_prompt_package="app.agents.market_entry.prompts",
+    reviewer_prompt_package="app.agents.pricing.prompts",
     reviewer_prompt="reviewer.md",
+    reviewer_prompt_for_stage={
+        "stage1_value": "reviewer_stage1_value.md",
+        "stage2_segments": "reviewer_stage2_segments.md",
+        "stage3_competitive": "reviewer_stage3_competitive.md",
+        "stage4_models": "reviewer_stage4_models.md",
+        "stage5_rollout": "reviewer_stage5_rollout.md",
+    },
     synthesis_prompt="synthesis.md",
     audit_prompt="audit.md",
 )

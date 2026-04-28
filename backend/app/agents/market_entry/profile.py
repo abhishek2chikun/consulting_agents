@@ -43,6 +43,13 @@ MARKET_ENTRY_PROFILE = ConsultingProfile(
     ),
     reviewer_prompt_package="app.agents.market_entry.prompts",
     reviewer_prompt="reviewer.md",
+    reviewer_prompt_for_stage={
+        "stage1_foundation": "reviewer_stage1_foundation.md",
+        "stage2_competitive": "reviewer_stage2_competitive.md",
+        "stage3_risk": "reviewer_stage3_risk.md",
+        "stage4_demand": "reviewer_stage4_demand.md",
+        "stage5_strategy": "reviewer_stage5_strategy.md",
+    },
     synthesis_prompt="synthesis.md",
     audit_prompt="audit.md",
 )
