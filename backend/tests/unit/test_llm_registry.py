@@ -6,6 +6,7 @@ constructors so they run without a database, network, or real API key.
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -205,6 +206,49 @@ async def test_get_chat_model_aws_constructs_bedrock_converse(
     # Factory must forward the model id.
     call_kwargs = constructor.call_args.kwargs
     assert call_kwargs.get("model") == "us.anthropic.claude-haiku-3-5-20241022-v1:0"
+
+
+@pytest.mark.asyncio
+async def test_get_chat_model_aws_resolves_bedrock_credentials_per_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each AWS call must resolve credential-bundle keys independently."""
+    keys = {"aws": "AKIAFIRSTKEY1234567:secret-a"}
+    _patch_service(
+        monkeypatch,
+        overrides={
+            "framing": {
+                "provider": "aws",
+                "model": "us.anthropic.claude-haiku-3-5-20241022-v1:0",
+            }
+        },
+        keys=keys,
+    )
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
+
+    first_model = _StubChatModel()
+    second_model = _StubChatModel()
+    constructor = MagicMock(side_effect=[first_model, second_model])
+    monkeypatch.setattr(llm_module, "ChatBedrockConverse", constructor)
+
+    session = MagicMock(spec=AsyncSession)
+    first_result = await get_chat_model("framing", session=session)
+    keys["aws"] = "AKIASECONDKEY7654321:secret-b"
+    second_result = await get_chat_model("framing", session=session)
+
+    assert first_result is first_model
+    assert second_result is second_model
+    assert constructor.call_count == 2
+    first_call = constructor.call_args_list[0].kwargs
+    second_call = constructor.call_args_list[1].kwargs
+    assert first_call["aws_access_key_id"].get_secret_value() == "AKIAFIRSTKEY1234567"
+    assert first_call["aws_secret_access_key"].get_secret_value() == "secret-a"
+    assert second_call["aws_access_key_id"].get_secret_value() == "AKIASECONDKEY7654321"
+    assert second_call["aws_secret_access_key"].get_secret_value() == "secret-b"
+    assert "AWS_ACCESS_KEY_ID" not in os.environ
+    assert "AWS_SECRET_ACCESS_KEY" not in os.environ
 
 
 @pytest.mark.asyncio
