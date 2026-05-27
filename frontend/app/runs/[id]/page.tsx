@@ -356,7 +356,7 @@ export default function RunPage() {
                 {events.length} event{events.length === 1 ? "" : "s"}
               </span>
             </div>
-            <div className="h-[380px] w-full">
+            <div className="h-[500px] w-full">
               <AgentGraph events={events} className="h-full w-full" />
             </div>
           </section>

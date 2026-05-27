@@ -51,9 +51,9 @@ const NODE_SIZE = 56; // diameter
 const ROW_GAP = 36; // vertical reserve for label + state below
 
 // Lane positions (percentages within the SVG viewBox).
-const LANE_TOP_Y = 22;
-const LANE_MID_Y = 52;
-const LANE_BOT_Y = 84;
+const LANE_TOP_Y = 20;
+const LANE_MID_Y = 48;
+const LANE_BOT_Y = 76;
 
 const SPINE_FRAME_X = 6;
 const SPINE_SYNTH_X = 80;
@@ -81,6 +81,7 @@ function stateClasses(state: AgentNodeData["state"]) {
         border: "border-sky-400/70",
         glow: "shadow-[0_0_24px_-2px_rgba(56,189,248,0.55)]",
         label: "text-sky-300",
+        container: "scale-110 z-30 opacity-100 transition-all duration-500",
       };
     case "completed":
       return {
@@ -90,6 +91,7 @@ function stateClasses(state: AgentNodeData["state"]) {
         border: "border-emerald-500/50",
         glow: "shadow-[0_0_18px_-4px_rgba(16,185,129,0.45)]",
         label: "text-emerald-300/90",
+        container: "scale-100 z-10 opacity-100 transition-all duration-500",
       };
     case "failed":
       return {
@@ -99,6 +101,7 @@ function stateClasses(state: AgentNodeData["state"]) {
         border: "border-rose-500/60",
         glow: "shadow-[0_0_18px_-4px_rgba(244,63,94,0.45)]",
         label: "text-rose-300/90",
+        container: "scale-100 z-20 opacity-100 transition-all duration-500",
       };
     default:
       return {
@@ -108,6 +111,7 @@ function stateClasses(state: AgentNodeData["state"]) {
         border: "border-white/10 border-dashed",
         glow: "",
         label: "text-stone-500",
+        container: "scale-[0.85] z-0 opacity-40 hover:opacity-80 transition-all duration-500",
       };
   }
 }
@@ -136,17 +140,14 @@ function stateLabel(node: AgentNodeData): string {
 export function AgentGraph({ events, className }: AgentGraphProps) {
   const { nodes, edges, latestVerdict } = useAgentStates(events);
 
-  // Lay nodes across three horizontal lanes:
-  //   top    — framing / synthesis / audit (the spine)
-  //   middle — stages 1..N (the iterate loop)
-  //   bottom — reviewer (gates each stage)
   const layout = useMemo<NodeLayout[]>(() => {
     if (nodes.length === 0) return [];
-    const stages = nodes.filter((n) => n.kind === "stage");
-    const stageCount = Math.max(1, stages.length);
-    const stageX = (idx: number) => {
-      if (stageCount === 1) return (STAGE_START_X + STAGE_END_X) / 2;
-      const t = idx / (stageCount - 1);
+    
+    const midNodes = nodes.filter(n => n.kind === "stage" || n.kind === "reviewer" || n.kind === "placeholder");
+    const count = Math.max(1, midNodes.length);
+    const midX = (idx: number) => {
+      if (count === 1) return (STAGE_START_X + STAGE_END_X) / 2;
+      const t = idx / (count - 1);
       return STAGE_START_X + t * (STAGE_END_X - STAGE_START_X);
     };
 
@@ -154,12 +155,12 @@ export function AgentGraph({ events, className }: AgentGraphProps) {
       if (n.kind === "framing") return { ...n, x: SPINE_FRAME_X, y: LANE_TOP_Y };
       if (n.kind === "synthesis") return { ...n, x: SPINE_SYNTH_X, y: LANE_TOP_Y };
       if (n.kind === "audit") return { ...n, x: SPINE_AUDIT_X, y: LANE_TOP_Y };
-      if (n.kind === "reviewer")
-        return { ...n, x: (STAGE_START_X + STAGE_END_X) / 2, y: LANE_BOT_Y };
-      if (n.kind === "placeholder") return { ...n, x: 50, y: LANE_MID_Y };
-      // Stage
-      const idx = stages.findIndex((s) => s.id === n.id);
-      return { ...n, x: stageX(Math.max(0, idx)), y: LANE_MID_Y };
+      
+      const idx = midNodes.findIndex((s) => s.id === n.id);
+      if (idx >= 0) {
+        return { ...n, x: midX(idx), y: LANE_MID_Y };
+      }
+      return { ...n, x: 50, y: LANE_MID_Y };
     });
   }, [nodes]);
 
@@ -171,8 +172,7 @@ export function AgentGraph({ events, className }: AgentGraphProps) {
         className="pointer-events-none absolute inset-y-0 left-2 z-0 flex flex-col justify-around text-[9px] font-semibold tracking-wider text-stone-600 uppercase"
       >
         <span>Frame</span>
-        <span>Research</span>
-        <span>Review</span>
+        <span>Pipeline</span>
       </div>
 
       {/* Subtle lane backgrounds */}
@@ -241,36 +241,6 @@ export function AgentGraph({ events, className }: AgentGraphProps) {
           const toNode = layout.find((n) => n.id === edge.to);
           if (!fromNode || !toNode) return null;
 
-          // ── Review band: subtle vertical link from stage down to reviewer ──
-          if (edge.kind === "review") {
-            const x = fromNode.x;
-            const y1 = fromNode.y + 5;
-            const y2 = toNode.y - 5;
-            // Curved path bowing slightly outward.
-            const path = `M ${x} ${y1} L ${x} ${y2}`;
-            return (
-              <line
-                key={`review-${i}`}
-                x1={x}
-                y1={y1}
-                x2={x}
-                y2={y2}
-                stroke={
-                  edge.active
-                    ? "hsl(35 90% 60% / 0.7)"
-                    : edge.done
-                      ? "hsl(152 55% 50% / 0.25)"
-                      : "hsl(220 12% 30% / 0.45)"
-                }
-                strokeWidth="0.18"
-                strokeDasharray="0.5 0.6"
-                strokeLinecap="round"
-                vectorEffect="non-scaling-stroke"
-              >
-                <title>{path}</title>
-              </line>
-            );
-          }
 
           // ── Reiterate loop: curved arc above the stage row ──
           if (edge.loop) {
@@ -370,16 +340,17 @@ function Node({ node }: { node: NodeLayout }) {
   const ref = useRef<HTMLDivElement>(null);
   const cls = stateClasses(node.state);
   const hasChildren = (node.children?.length ?? 0) > 0;
+  const isReviewer = node.kind === "reviewer";
+  const size = isReviewer ? 32 : NODE_SIZE;
 
   return (
     <div
       ref={ref}
-      className="absolute"
+      className={cn("absolute -translate-x-1/2 -translate-y-1/2", cls.container)}
       data-agent-node={node.id}
       style={{
         left: `${node.x}%`,
         top: `${node.y}%`,
-        transform: "translate(-50%, -50%)",
       }}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
@@ -391,7 +362,7 @@ function Node({ node }: { node: NodeLayout }) {
         <span
           aria-hidden
           className="absolute inset-0 -m-2 animate-ping rounded-full bg-sky-400/20"
-          style={{ width: NODE_SIZE + 16, height: NODE_SIZE + 16 }}
+          style={{ width: size + 16, height: size + 16 }}
         />
       )}
 
@@ -407,10 +378,12 @@ function Node({ node }: { node: NodeLayout }) {
           cls.ring,
           cls.glow,
         )}
-        style={{ width: NODE_SIZE, height: NODE_SIZE }}
+        style={{ width: size, height: size }}
         aria-label={`${node.label} — ${stateLabel(node)}`}
       >
-        <StateGlyph state={node.state} kind={node.kind} />
+        <div className={isReviewer ? "scale-75" : ""}>
+          <StateGlyph state={node.state} kind={node.kind} />
+        </div>
 
         {/* Attempt badge */}
         {node.attempt > 1 && (
@@ -431,7 +404,7 @@ function Node({ node }: { node: NodeLayout }) {
       </button>
 
       {hasChildren && (
-        <div className="absolute left-1/2 top-full z-20 mt-13 flex min-w-[140px] -translate-x-1/2 flex-col items-center gap-1.5">
+        <div className="absolute left-1/2 top-full z-20 mt-8 flex min-w-[140px] -translate-x-1/2 flex-col items-center gap-1.5">
           <button
             type="button"
             className="rounded-full border border-white/10 bg-stone-950/85 px-2 py-0.5 text-[9px] font-semibold tracking-wide text-stone-300 transition hover:border-white/20 hover:text-stone-100"
@@ -450,10 +423,12 @@ function Node({ node }: { node: NodeLayout }) {
                   <div
                     key={child.id}
                     className={cn(
-                      "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] leading-none shadow-sm",
+                      "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] leading-none shadow-sm transition-all duration-300",
                       childCls.bg,
                       childCls.border,
                       childCls.text,
+                      child.state === "working" && "ring-1 ring-sky-400/50 shadow-[0_0_12px_-2px_rgba(56,189,248,0.4)] scale-105",
+                      child.state === "idle" && "opacity-40 hover:opacity-80 scale-95",
                     )}
                     title={child.lastMessage ?? child.id}
                   >
@@ -469,17 +444,21 @@ function Node({ node }: { node: NodeLayout }) {
 
       {/* Label */}
       <div className="pointer-events-none absolute left-1/2 top-full mt-2 -translate-x-1/2 text-center">
-        <div
-          className={cn(
-            "max-w-[120px] truncate text-xs font-medium",
-            node.state === "idle" ? "text-stone-400" : cls.label.replace("/90", ""),
-          )}
-        >
-          {node.label}
-        </div>
-        <div className="mt-0.5 text-[10px] tracking-wide text-stone-500 capitalize">
-          {stateLabel(node)}
-        </div>
+        {!isReviewer && (
+          <div
+            className={cn(
+              "max-w-[120px] truncate text-xs font-medium",
+              node.state === "idle" ? "text-stone-400" : cls.label.replace("/90", ""),
+            )}
+          >
+            {node.label}
+          </div>
+        )}
+        {!isReviewer && (
+          <div className="mt-0.5 text-[10px] tracking-wide text-stone-500 capitalize">
+            {stateLabel(node)}
+          </div>
+        )}
       </div>
 
       {/* Hover popover */}
@@ -487,7 +466,7 @@ function Node({ node }: { node: NodeLayout }) {
         <div
           role="tooltip"
           className="absolute left-1/2 z-30 mt-3 w-[280px] -translate-x-1/2 rounded-xl border border-white/10 bg-stone-950/95 p-3 text-left text-xs shadow-2xl backdrop-blur-xl"
-          style={{ top: NODE_SIZE + 36 }}
+          style={{ top: size + 36 }}
         >
           <div className="mb-1.5 flex items-center justify-between gap-2">
             <span className="font-mono text-[10px] tracking-wider text-stone-500 uppercase">

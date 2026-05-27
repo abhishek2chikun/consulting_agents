@@ -200,6 +200,7 @@ export function useAgentStates(events: RunEvent[]): AgentStatesResult {
     const discovered = new Map<string, AgentNodeData>();
     const tracked = new Map<string, AgentNodeData>();
     let activeId: string | null = null;
+    let lastActiveStage: string | null = null;
     let runFailed = false;
     let runCompleted = false;
     let latestVerdict: AgentStatesResult["latestVerdict"] = null;
@@ -273,39 +274,56 @@ export function useAgentStates(events: RunEvent[]): AgentStatesResult {
           };
           if (payload.stage) {
             const sm = classify(payload.stage);
-            const kind: AgentNodeData["kind"] =
-              sm.kind === "stage" ||
-              sm.kind === "framing" ||
-              sm.kind === "synthesis" ||
-              sm.kind === "audit" ||
-              sm.kind === "placeholder"
-                ? sm.kind
-                : "stage";
-            const node = ensure(sm.id, sm.label, kind, sm.stageIndex);
-            node.attempt = Math.max(node.attempt, payload.attempt ?? node.attempt);
-            node.eventCount += 1;
-            node.lastTs = evt.ts;
+            const stageNode = ensure(sm.id, sm.label, "stage", sm.stageIndex);
+            
+            const revId = `reviewer_${sm.id}`;
+            const revNode = ensure(revId, "Review", "reviewer", sm.stageIndex);
+
+            stageNode.attempt = Math.max(stageNode.attempt, payload.attempt ?? stageNode.attempt);
+            revNode.attempt = Math.max(revNode.attempt, payload.attempt ?? revNode.attempt);
+            
+            stageNode.eventCount += 1;
+            stageNode.lastTs = evt.ts;
+            
+            revNode.eventCount += 1;
+            revNode.lastTs = evt.ts;
+            revNode.lastMessage = `${payload.stage} → ${payload.verdict}`;
+
             const verdict = payload.verdict ?? "";
             if (verdict === "advance") {
-              node.state = "completed";
-              node.reiterating = false;
+              stageNode.state = "completed";
+              stageNode.reiterating = false;
+              revNode.state = "completed";
               activeId = null;
             } else if (verdict === "reiterate") {
-              node.state = "working";
-              node.reiterating = true;
-              activeId = node.id;
+              stageNode.state = "working";
+              stageNode.reiterating = true;
+              revNode.state = "completed";
+              activeId = stageNode.id;
             } else if (verdict === "halt" || verdict === "fail") {
-              node.state = "failed";
-              node.reiterating = false;
+              stageNode.state = "failed";
+              stageNode.reiterating = false;
+              revNode.state = "failed";
             }
             latestVerdict = {
               stage: payload.stage,
               verdict,
-              attempt: payload.attempt ?? node.attempt,
+              attempt: payload.attempt ?? stageNode.attempt,
             };
           }
         }
         continue;
+      }
+
+
+      if (meta.kind === "stage") {
+        lastActiveStage = meta.id;
+      }
+
+      if (meta.kind === "reviewer" && evt.type !== "gate_verdict") {
+        if (lastActiveStage) {
+          meta.id = `reviewer_${lastActiveStage}`;
+        }
       }
 
       // Lifecycle events with no agent slot fall through to system.
@@ -398,7 +416,11 @@ export function useAgentStates(events: RunEvent[]): AgentStatesResult {
         }
       }
       stageNodes.sort((a, b) => (a.stageIndex ?? 99) - (b.stageIndex ?? 99));
-      ordered.push(...stageNodes);
+      for (const stage of stageNodes) {
+        ordered.push(stage);
+        const revId = `reviewer_${stage.id}`;
+        ordered.push(discovered.get(revId) ?? emptyNode(revId, "Review", "reviewer", stage.stageIndex));
+      }
 
       ordered.push(
         discovered.get("synthesis") ??
@@ -425,53 +447,16 @@ export function useAgentStates(events: RunEvent[]): AgentStatesResult {
       });
     }
 
-    // ── Reviewer as its own node ──
-    // Discover by counting gate_verdict events; surface a parallel
-    // "Reviewer" node connected by a review-band to each stage so
-    // the visual makes the iteration loop explicit.
-    const verdictEvents = events.filter(
-      (e) => e.type === "gate_verdict" && (e.agent === "reviewer" || e.agent === "review"),
-    );
-    const stageNodesOnly = nodes.filter((n) => n.kind === "stage");
-    if (verdictEvents.length > 0 && stageNodesOnly.length > 0) {
-      const reviewerNode: AgentNodeData = emptyNode("reviewer", "Reviewer", "reviewer");
-      reviewerNode.eventCount = verdictEvents.length;
-      reviewerNode.lastTs = verdictEvents[verdictEvents.length - 1]!.ts;
-      // Reviewer state mirrors the latest verdict.
-      if (latestVerdict?.verdict === "reiterate") reviewerNode.state = "working";
-      else if (latestVerdict?.verdict === "advance") reviewerNode.state = "completed";
-      else if (latestVerdict?.verdict === "halt" || latestVerdict?.verdict === "fail")
-        reviewerNode.state = "failed";
-      else reviewerNode.state = "completed";
-      reviewerNode.attempt = latestVerdict?.attempt ?? 1;
-      if (latestVerdict)
-        reviewerNode.lastMessage = `${latestVerdict.stage} → ${latestVerdict.verdict}`;
-      reviewerNode.reiterating = latestVerdict?.verdict === "reiterate";
-      nodes.push(reviewerNode);
+    // Reiterate loop handled purely by edges backward from reviewer to stage
 
-      // Review-band edges: each stage that produced a verdict ↔ reviewer.
-      const stagesWithVerdicts = new Set(verdictEvents.map((e) => (e.payload as { stage?: string }).stage ?? ""));
-      for (const stage of stageNodesOnly) {
-        if (!stagesWithVerdicts.has(stage.id)) continue;
-        edges.push({
-          from: stage.id,
-          to: "reviewer",
-          active: latestVerdict?.stage === stage.id && latestVerdict.verdict === "reiterate",
-          done: stage.state === "completed",
-          loop: false,
-          kind: "review",
-        });
-      }
-    }
-
-    // Reiterate loop: most recent reviewer reiterate goes from this stage
-    // back one position.
+    // Reiterate loop: if reviewer failed or reiterated, draw an arc back
     if (latestVerdict?.verdict === "reiterate") {
-      const idx = nodes.findIndex((n) => n.id === latestVerdict!.stage);
-      if (idx > 0) {
+      const stageIdx = nodes.findIndex((n) => n.id === latestVerdict!.stage);
+      const revIdx = nodes.findIndex((n) => n.id === `reviewer_${latestVerdict!.stage}`);
+      if (stageIdx >= 0 && revIdx >= 0) {
         edges.push({
-          from: nodes[idx]!.id,
-          to: nodes[idx - 1]!.id,
+          from: nodes[revIdx]!.id,
+          to: nodes[stageIdx]!.id,
           active: true,
           done: false,
           loop: true,
