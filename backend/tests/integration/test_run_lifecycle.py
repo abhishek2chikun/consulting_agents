@@ -33,7 +33,8 @@ from app.models import (
     RunStatus,
 )
 from app.testing.fake_chat_model import FakeChatModel
-from app.workers.run_worker import ModelFactory
+from app.workers.run_worker import ModelFactory, _reconstruct_retry_state
+from app.agents._engine.registry import get_profile
 from tests.integration.v16_smoke_helpers import ScriptedResearchModel
 
 
@@ -615,5 +616,104 @@ async def test_retry_rejects_failed_run_without_saved_answers(
         retry = await client.post(f"/runs/{run_id}/retry")
         assert retry.status_code == 409
         assert retry.json()["detail"] == "run has no saved questionnaire answers"
+    finally:
+        await _cleanup_run(run_id)
+
+
+async def _create_failed_run_mid_reiterate() -> uuid.UUID:
+    async with AsyncSessionLocal() as session:
+        run = Run(
+            user_id=SINGLETON_USER_ID,
+            task_id="market_entry",
+            goal="Retry scoped reiterate",
+            status=RunStatus.failed,
+            model_snapshot={"settings": {}, "document_ids": []},
+        )
+        session.add(run)
+        await session.flush()
+        session.add(
+            Message(
+                run_id=run.id,
+                role=MessageRole.user,
+                content=json.dumps({"target_market": "Germany", "budget": "medium"}),
+            )
+        )
+        session.add_all(
+            [
+                Artifact(
+                    run_id=run.id,
+                    path="stage1_foundation/market_sizing/findings.md",
+                    kind="markdown",
+                    content="Stage 1 sizing [^s1].",
+                ),
+                Artifact(
+                    run_id=run.id,
+                    path="stage2_competitive/competitor/findings.md",
+                    kind="markdown",
+                    content="Stage 2 competitor [^s2].",
+                ),
+            ]
+        )
+        session.add(
+            Evidence(
+                run_id=run.id,
+                src_id="s1",
+                title="Prior source",
+                url="https://example.com/s1",
+                snippet="snippet",
+                kind=EvidenceKind.web,
+                provider="test",
+            )
+        )
+        session.add_all(
+            [
+                Gate(
+                    run_id=run.id,
+                    stage="stage1_foundation",
+                    attempt=1,
+                    verdict="advance",
+                    gaps=[],
+                    target_agents=[],
+                    rationale="ok",
+                ),
+                Gate(
+                    run_id=run.id,
+                    stage="stage2_competitive",
+                    attempt=1,
+                    verdict="reiterate",
+                    gaps=["pricing gap"],
+                    target_agents=["pricing"],
+                    rationale="fix pricing",
+                ),
+            ]
+        )
+        await session.commit()
+        return run.id
+
+
+@pytest.mark.asyncio
+async def test_retry_concurrent_requests_only_one_starts(client: httpx.AsyncClient) -> None:
+    run_id = await _create_failed_run_ready_for_stage3_retry()
+    try:
+        first, second = await asyncio.gather(
+            client.post(f"/runs/{run_id}/retry"),
+            client.post(f"/runs/{run_id}/retry"),
+        )
+        statuses = sorted([first.status_code, second.status_code])
+        assert statuses == [204, 409]
+        conflict = first if first.status_code == 409 else second
+        assert conflict.json()["detail"] == "only failed or cancelled runs can be retried"
+    finally:
+        await _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_reconstruct_retry_state_restores_reiterate_target_agents() -> None:
+    run_id = await _create_failed_run_mid_reiterate()
+    try:
+        profile = get_profile("market_entry")
+        retry_state = await _reconstruct_retry_state(run_id, profile=profile)
+        assert retry_state.entry_node == "stage2_competitive"
+        assert retry_state.initial["target_agents"] == ["pricing"]
     finally:
         await _cleanup_run(run_id)

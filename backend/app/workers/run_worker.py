@@ -446,6 +446,7 @@ async def _reconstruct_retry_state(
 
         snapshot = run.model_snapshot or {}
         document_ids = snapshot.get("document_ids", []) or []
+        entry_node = _resume_entry_node(profile, artifacts=artifacts, gate_verdicts=gate_verdicts)
         initial: RunState = {
             "run_id": str(run_id),
             "goal": run.goal,
@@ -460,9 +461,12 @@ async def _reconstruct_retry_state(
             "evidence": evidence,
             "stage_attempts": stage_attempts,
             "gate_verdicts": gate_verdicts,
-            "target_agents": None,
+            "target_agents": _resume_target_agents(
+                profile,
+                entry_node=entry_node,
+                gate_verdicts=gate_verdicts,
+            ),
         }
-        entry_node = _resume_entry_node(profile, artifacts=artifacts, gate_verdicts=gate_verdicts)
         return RetryState(initial=initial, entry_node=entry_node)
 
 
@@ -481,6 +485,26 @@ def _resume_entry_node(
     if AUDIT_PATH not in artifacts:
         return "audit"
     return "audit"
+
+
+def _resume_target_agents(
+    profile: ConsultingProfile,
+    *,
+    entry_node: str,
+    gate_verdicts: dict[str, GateVerdict],
+) -> list[str] | None:
+    """Restore scoped worker fanout when resuming mid-reiterate pass."""
+    stage_slug = next(
+        (stage.slug for stage in profile.stages if stage.node_name == entry_node),
+        None,
+    )
+    if stage_slug is None:
+        return None
+    verdict = gate_verdicts.get(stage_slug)
+    if verdict is None or verdict.get("verdict") != "reiterate":
+        return None
+    agents = list(verdict.get("target_agents") or [])
+    return agents or None
 
 
 async def _run_is_cancelling(run_id: uuid.UUID) -> bool:
