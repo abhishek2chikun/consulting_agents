@@ -9,7 +9,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.agents  # noqa: F401  # populate PROFILE_REGISTRY with built-in profiles
@@ -175,11 +175,6 @@ async def retry_run(
     run = await session.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    if run.status not in (RunStatus.failed, RunStatus.cancelled):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="only failed or cancelled runs can be retried",
-        )
     profile = _profile_for_task_type(run.task_id)
     if profile is None:
         raise HTTPException(
@@ -194,10 +189,25 @@ async def retry_run(
 
     model_factory = await factory_builder(run_id)
     now = datetime.now(UTC)
-    run.status = RunStatus.running
-    run.started_at = now
-    run.heartbeat_at = now
-    run.completed_at = None
+    transition = await session.execute(
+        update(Run)
+        .where(
+            Run.id == run_id,
+            Run.status.in_((RunStatus.failed, RunStatus.cancelled)),
+        )
+        .values(
+            status=RunStatus.running,
+            started_at=now,
+            heartbeat_at=now,
+            completed_at=None,
+        )
+        .returning(Run.id)
+    )
+    if transition.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="only failed or cancelled runs can be retried",
+        )
     await session.commit()
     await publish(run_id, "run_retry_started", {"resume_from": resume_from}, agent="system")
     TASK_REGISTRY.spawn(
